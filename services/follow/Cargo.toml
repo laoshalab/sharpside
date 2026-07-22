@@ -1,0 +1,33 @@
+[package]
+name = "sharpside-follow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "跟随关系 CRUD + 信号派生 worker（消费 trader.events → 入 copy_queue）"
+
+[dependencies]
+sharpside-shared.workspace = true
+sharpside-db.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+jsonwebtoken.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+rust_decimal.workspace = true
+
+# 设计说明：
+# - 不依赖 apalis/redis（未缓存）：信号派生通过 `POST /internal/signals` 同步 HTTP 端点，
+#   venue-hub 检出仓位变化时调用。后续有网络环境可切 apalis redis 队列获得持久化与重试。
+# - JWT 校验与 account 共用同一 secret（HS256），复用 Claims 结构（本地复制最小实现）。

@@ -1,0 +1,43 @@
+---
+title: "TG Bot 手册"
+description: "通道 A teloxide Bot 的命令、鉴权与本地运行说明"
+category: "technical"
+section: "operations"
+order: 21
+icon: "bot"
+tags: ["telegram", "teloxide", "channel-a"]
+lastUpdated: "2026-07-22"
+difficulty: "beginner"
+---
+
+## 角色
+
+`apps/tg-bot` 是通道 A 用户面：绑定账户、创建/管理跟随、查询交易者与绩效。
+
+## 主要命令
+
+| 命令 | 作用 |
+|------|------|
+| `/start` | 绑定 TG 用户与账户 |
+| `/follow` | 创建跟随（channel=tg） |
+| `/follows` `/unfollow` | 管理跟随 |
+| `/traders` `/perf` | 浏览交易者与绩效 |
+| `/setamount` | 设置默认跟单金额 |
+
+## 鉴权
+
+Bot 使用 `X-TG-Bot-Secret` 调用 `POST /account/auth/tg` 换 JWT，本地缓存；遇 401 自动重换。
+
+## 运行
+
+```bash
+export TG_BOT_TOKEN=...
+export TG_BOT_SECRET=...   # 与 account 侧一致
+cargo run -p tg-bot
+```
+
+<Callout type="info">
+  无 `TG_BOT_TOKEN` 时进程应优雅退出。本机若无法访问 `api.telegram.org`，可用 curl 等价流程验证后端契约（见 README）。
+</Callout>
+
+详见 `docs/RUNBOOK_TG_BOT.md`。

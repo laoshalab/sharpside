@@ -1,0 +1,137 @@
+{
+  "nav": {
+    "home": "Home",
+    "copy": "Copy",
+    "channels": "Channels",
+    "venues": "Venues",
+    "risk": "Risk",
+    "tech": "Developers",
+    "docs": "Docs",
+    "launchApp": "Open App",
+    "toggleTheme": "Toggle theme",
+    "openMenu": "Open menu"
+  },
+  "footer": {
+    "tagline": "Multi-venue prediction market copy trading · Venue-first · Dual-channel execution",
+    "product": "Product",
+    "developers": "Developers",
+    "docs": "Docs",
+    "guide": "Product Guide",
+    "architecture": "Architecture",
+    "copy": "Copy trading",
+    "channels": "Dual channels",
+    "venues": "Venues",
+    "risk": "Risk",
+    "tech": "Tech overview",
+    "setup": "Setup",
+    "launchApp": "Open App →"
+  },
+  "home": {
+    "heading": "Multi-venue prediction market",
+    "headingAccent": "copy-trading docs",
+    "subtitle": "Product guides, architecture notes, and ops manuals in one place. Built like the Nexus knowledge base: filesystem MDX, three-column docs shell, auto sidebar and TOC.",
+    "ctaPrimary": "Enter docs",
+    "ctaSecondary": "Read architecture",
+    "pillars": {
+      "reach": {
+        "title": "Reach wide",
+        "desc": "Venue as a first-class citizen. Polymarket first, native multi-venue expansion."
+      },
+      "discover": {
+        "title": "Find edge",
+        "desc": "Leaderboards, performance tags, and cross-venue identity to discover traders worth following."
+      },
+      "follow": {
+        "title": "Keep pace",
+        "desc": "Dual-channel execution: TG delegated signing + self-hosted zero-key daemon."
+      },
+      "operate": {
+        "title": "Run ops",
+        "desc": "Shadow mode, three-tier risk controls, and an admin review desk for a closed ops loop."
+      }
+    }
+  },
+  "docs": {
+    "badge": "Sharpside Knowledge Base",
+    "title": "Docs",
+    "subtitle": "Unified entry for product and technical docs. Sidebar is generated from the MDX filesystem; articles include reading time, tags, and on-page TOC.",
+    "toc": "Menu",
+    "onThisPage": "On this page",
+    "prevArticle": "Previous",
+    "nextArticle": "Next",
+    "minutes": "min read",
+    "guide": "Product Guide",
+    "guideDesc": "Learn Sharpside’s positioning, dual-channel execution model, and how to discover traders and create follows.",
+    "guideCta": "Start reading",
+    "technical": "Technical Docs",
+    "technicalDesc": "Setup, architecture, Venue design, integration, and ops manuals for contributors and operators.",
+    "technicalCta": "Open technical docs",
+    "sections": {
+      "getting-started": "Getting started",
+      "architecture": "Architecture",
+      "operations": "Operations"
+    }
+  },
+  "pages": {
+    "copy": {
+      "eyebrow": "Copy Trading",
+      "title": "Discover traders. Follow in one click.",
+      "description": "Find addresses worth following via leaderboards and performance tags, then pick a channel and sizing mode to join the signal execution path.",
+      "bullets": [
+        "Leaderboard / trader detail: ROI, win rate, drawdown, and tags at a glance",
+        "Create a follow: choose Venue, channel (TG / daemon), and sizing",
+        "Trade history & dashboard: copy results stay auditable"
+      ],
+      "primary": "Read the copy guide",
+      "secondary": "Enter docs"
+    },
+    "channels": {
+      "eyebrow": "Dual Channels",
+      "title": "Dual-channel execution with clear custody boundaries",
+      "description": "Channel A uses TG delegated signing. Channel B uses a self-hosted zero-key daemon. Both are first-class—pick what fits.",
+      "bullets": [
+        "Channel A: Telegram Bot binds accounts and creates follows; platform signing boundaries are explicit",
+        "Channel B: local daemon + API key; private keys never leave the user’s device",
+        "One account can mix channels across different follows"
+      ],
+      "primary": "Learn dual channels",
+      "secondary": "TG Bot handbook"
+    },
+    "venues": {
+      "eyebrow": "Venues",
+      "title": "Venue as a first-class citizen",
+      "description": "Polymarket ships first. Market mapping, cross-venue identity, and Registry leave a unified interface for more venues later.",
+      "bullets": [
+        "crates/venues: shared trait + Polymarket adapter",
+        "venue-hub: ingest, mapping, identity, performance materialization",
+        "Admin reviews mappings and identity to reduce bad follows"
+      ],
+      "primary": "Read Venue design",
+      "secondary": "System architecture"
+    },
+    "risk": {
+      "eyebrow": "Risk & Ops",
+      "title": "Ops-ready: risk controls and shadow mode",
+      "description": "Loss streaks circuit-break, tier/user/Venue overrides, slippage protection, plus shadow mode vs third-party metrics.",
+      "bullets": [
+        "copier runs risk checks before execution: caps, slippage, circuit breakers",
+        "Shadow mode: internal performance vs third-party diff → metric_audit",
+        "Admin: tag rules, visibility, hotkeys, and a review desk"
+      ],
+      "primary": "Shadow mode notes",
+      "secondary": "Docs"
+    },
+    "tech": {
+      "eyebrow": "Developers",
+      "title": "Technical entry for contributors and operators",
+      "description": "Rust workspace, Gateway BFF, venue-hub, and dual-channel execution. Local setup and integration runbooks live in the docs.",
+      "bullets": [
+        "Setup: Rust, Docker Postgres, e2e.sh",
+        "Architecture: service topology and module roles",
+        "Runbook: Polymarket integration, TG Bot, shadow mode"
+      ],
+      "primary": "Environment setup",
+      "secondary": "System architecture"
+    }
+  }
+}

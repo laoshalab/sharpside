@@ -1,0 +1,45 @@
+---
+title: "跟单入门"
+description: "从发现交易者到创建跟随、查看成交，走通最小用户路径"
+category: "guide"
+section: "copy"
+order: 3
+icon: "users"
+tags: ["copy-trading", "follows", "web"]
+lastUpdated: "2026-07-22"
+---
+
+## 最小路径
+
+```text
+登录 / TG 绑定
+  → 浏览排行榜 /traders
+  → 打开交易者详情
+  → 创建跟随（选通道 + 仓位模式）
+  → 等待信号 → 执行（或 dry_run）
+  → 查看成交历史
+```
+
+## 关键跟随时要填什么
+
+- **目标交易者**：Venue + 地址（或从详情页带入）。
+- **通道**：`tg` 或 `daemon`。
+- **仓位模式**：例如固定金额 / 比例（以当前 API `SizingMode` 为准）。
+- **风控覆盖**（可选）：单笔上限、滑点、连续亏损熔断等。
+
+## Web 与 Bot
+
+| 能力 | Web（F0） | TG Bot |
+|------|-----------|--------|
+| 排行榜 / 详情 | ✅ | `/traders` `/perf` |
+| 创建/管理跟随 | ✅ | `/follow` `/follows` `/unfollow` |
+| 钱包 / daemon key | ✅ | — |
+| 仪表盘 | ✅ | — |
+
+## Dry run 先跑通
+
+<Callout type="tip" title="推荐顺序">
+  联调与自测默认开 dry_run：信号仍会写入 `copy_execution`，但不触达真实下单。确认映射、时延与仓位计算无误后再关 dry_run。
+</Callout>
+
+端到端脚本：`bash infra/e2e.sh`（见仓库 README）。Polymarket 真数据联调见 [Polymarket 联调](/docs/technical/operations/polymarket-live)。

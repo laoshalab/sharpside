@@ -1,0 +1,135 @@
+[workspace]
+# resolver v3（1.84+）：默认 MSRV-aware 回退，避免选 rust-version 超工具链的依赖版本
+# （alloy 2.2 需 1.94，本机 1.91 → 自动选 2.1.1）。
+resolver = "3"
+members = [
+    # 共享 crates
+    "crates/shared",
+    "crates/venues/core",
+    "crates/venues/polymarket",
+    "crates/db",
+    "crates/perf",
+    "crates/botfilter",
+    "crates/mapping",
+    "crates/identity",
+    "crates/kms",
+    "crates/clob-auth",
+    # 核心服务
+    "services/gateway",
+    "services/venue-hub",
+    "services/follow",
+    "services/copier",
+    "services/account",
+    # 应用前端
+    "apps/web",
+    "apps/tg-bot",
+    "apps/daemon",
+    "apps/admin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# alloy EIP-712 签名需 rust 1.91（alloy-signer 2.1.1 MSRV）；工具链即 1.91。
+rust-version = "1.91"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sharpside/sharpside"
+authors = ["Sharpside Team"]
+
+[workspace.dependencies]
+# 异步运行时与 web 框架
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
+
+# 数据库（rust_decimal 映射 numeric 列；default-features=false 禁用 sqlite 默认拉入避免多余依赖）。
+# 注意：sqlx-macros-core 0.8.6 把 sqlx-sqlite 声明为非可选依赖 → flume 0.11.0 → spin 0.9.8(yanked)。
+# 已用 `[patch.crates-io] spin = vendor/spin` 覆盖，故可保留 `macros`（FromRow derive 需要）。
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "macros", "migrate", "rust_decimal"] }
+
+# 缓存 / 队列
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+bb8 = "0.8"
+bb8-redis = "0.17"
+apalis = { version = "0.6", features = ["redis"] }
+
+# HTTP 客户端 + 限流（禁 default 避开 native-tls/openssl，纯 rustls）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+governor = "0.6"
+
+# 序列化 / 错误 / 日志 / 配置
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# 校验 / 鉴权
+garde = "0.20"
+jsonwebtoken = "9"
+argon2 = { version = "0.5", features = ["password-hash", "std"] }
+# argon2 盐生成用 OsRng（password-hash 0.5 的 rand_core feature 不暴露 rand 模块，直接引 rand 0.8）。
+rand = "0.8"
+
+# 时间 / UUID
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rust_decimal = "1"
+
+# 异步 trait + bitflags
+async-trait = "0.1"
+bitflags = { version = "2", features = ["serde"] }
+
+# TUI（daemon 通道 B 客户端）
+ratatui = "0.30"
+crossterm = "0.28"
+
+# 链上签名（Polymarket CLOB EIP-712 订单签名）。
+# alloy meta 2.2 需 rust 1.94；改用最小子 crate 集，避免拉入 consensus/rpc-types。
+# alloy-signer/signer-local 钉 =2.1.1（MSRV 1.91）；sol-types/primitives 浮动到 1.6.x（MSRV 1.85）。
+alloy-signer = { version = "=2.1.1", features = ["eip712"] }
+alloy-signer-local = "=2.1.1"
+alloy-sol-types = "1.6"
+alloy-primitives = "1.6"
+
+# CLOB L2 HMAC / L1 EIP-712 鉴权（clob-auth crate 用）
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+zeroize = "1.8"
+
+# SIWE（EIP-4361）钱包登录：仅用基础 EOA EIP-191 验签（不启用 alloy feature，避免与 alloy-signer 2.x 冲突）。
+# crate 自带 k256/sha3 做 ecrecover，与我们的 alloy 栈解耦。
+signinwithethereum = "0.8"
+
+# 内部 crates 互引（用 path + workspace = true）
+sharpside-shared = { path = "crates/shared" }
+sharpside-venues-core = { path = "crates/venues/core" }
+sharpside-venues-polymarket = { path = "crates/venues/polymarket" }
+sharpside-db = { path = "crates/db" }
+sharpside-perf = { path = "crates/perf" }
+sharpside-botfilter = { path = "crates/botfilter" }
+sharpside-mapping = { path = "crates/mapping" }
+sharpside-identity = { path = "crates/identity" }
+sharpside-kms = { path = "crates/kms" }
+sharpside-clob-auth = { path = "crates/clob-auth" }
+
+# 离线编译补丁：spin 0.9.8 在 crates.io 被 yanked，但 flume 0.11.0（经 sqlx-sqlite）
+# 非可选地依赖它。用本地 vendored 副本覆盖，绕过 yanked 检查。
+# 有网络环境可删除此 patch，让 cargo 从 registry 解析。
+[patch.crates-io]
+spin = { path = "vendor/spin" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true

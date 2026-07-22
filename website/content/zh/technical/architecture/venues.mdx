@@ -1,0 +1,40 @@
+---
+title: "Venue 设计"
+description: "Venue trait、Registry、多平台映射与身份链接的设计要点"
+category: "technical"
+section: "architecture"
+order: 11
+icon: "server"
+tags: ["venue", "polymarket", "mapping"]
+lastUpdated: "2026-07-22"
+difficulty: "intermediate"
+---
+
+## Venue 一等公民
+
+每个交易场所是独立 adapter，实现统一能力面（市场、成交、下单、账户视图等，以 `crates/venues/core` 为准）。`Registry` 按 platform 解析实现。
+
+## Phase 1 范围
+
+- **已落地**：Polymarket adapter（公开 API 读路径 + CLOB 相关执行路径）。
+- **预留**：其他预测市场 Venue，通过同一 trait 扩展。
+
+## 市场映射与身份
+
+跨 Venue 跟单依赖：
+
+1. **Market mapping** — 不同场所同一事件/结果的对应关系（启发式 + 人工审核）。
+2. **Identity linking** — 同一人在多平台的地址/账号关联（`crates/identity`）。
+
+Admin 后台负责审核候选映射与身份，避免错误跟单。
+
+## 数据流（简化）
+
+```text
+Venue API → ingest → raw_markets / traders / raw_trades
+         → mapping / identity
+         → perf 物化（position_timeline, equity_curve, tags）
+         → 排行榜 / 详情 API
+```
+
+详细表结构见仓库 `docs/VENUEHUB_STORAGE.md`、`docs/VENUE_DESIGN.md`。

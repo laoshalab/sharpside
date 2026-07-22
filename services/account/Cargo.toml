@@ -1,0 +1,46 @@
+[package]
+name = "sharpside-account"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "用户 / Pro+ 订阅 / 管辖域 / per-Venue 凭证 / daemon_api_key 颁发"
+
+[dependencies]
+sharpside-shared.workspace = true
+sharpside-db.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+jsonwebtoken.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+rust_decimal.workspace = true
+# 密码哈希：argon2（Argon2id）。verify 兼容旧 PBKDF2 哈希（$argon2 前缀判断）。
+argon2.workspace = true
+rand.workspace = true
+governor.workspace = true
+hex.workspace = true
+sha2 = "0.10"
+time = "0.3"
+# 钱包登录：SIWE 解析 + EIP-191 EOA 验签（无 alloy feature，自带 k256/sha3）。
+signinwithethereum.workspace = true
+hmac = "0.12"
+# 通道 A deposit wallet 预配：生成 owner EOA、KMS 加密、CREATE2 派生、Relayer/CLOB 联调。
+sharpside-venues-core.workspace = true
+sharpside-venues-polymarket.workspace = true
+sharpside-kms.workspace = true
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
+alloy-primitives.workspace = true
+reqwest.workspace = true

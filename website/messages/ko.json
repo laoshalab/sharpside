@@ -1,0 +1,137 @@
+{
+  "nav": {
+    "home": "홈",
+    "docs": "지식 베이스",
+    "toggleTheme": "테마 전환",
+    "openMenu": "메뉴 열기",
+    "copy": "카피 트레이딩",
+    "channels": "듀얼 채널",
+    "venues": "멀티 베뉴",
+    "risk": "리스크",
+    "tech": "개발자",
+    "launchApp": "앱 열기"
+  },
+  "footer": {
+    "tagline": "멀티 베뉴 예측시장 카피 트레이딩 · Venue 우선 · 듀얼 채널 실행",
+    "docs": "지식 베이스",
+    "guide": "제품 가이드",
+    "architecture": "아키텍처",
+    "product": "제품",
+    "developers": "개발자",
+    "copy": "카피 트레이딩",
+    "channels": "듀얼 채널",
+    "venues": "멀티 베뉴",
+    "risk": "리스크",
+    "tech": "기술 개요",
+    "setup": "환경 구성",
+    "launchApp": "앱 열기 →"
+  },
+  "home": {
+    "heading": "멀티 베뉴 예측시장",
+    "headingAccent": "카피 문서",
+    "subtitle": "제품 가이드, 아키텍처 설명, 운영 매뉴얼을 한곳에. Nexus 지식 베이스와 동일한 구조: 파일시스템 MDX, 3열 문서 셸, 자동 사이드바·목차.",
+    "ctaPrimary": "문서 들어가기",
+    "ctaSecondary": "아키텍처 읽기",
+    "pillars": {
+      "reach": {
+        "title": "넓게 연결",
+        "desc": "Venue를 1급 시민으로. Polymarket 우선, 네이티브 멀티 베뉴 확장."
+      },
+      "discover": {
+        "title": "찾을 수 있게",
+        "desc": "리더보드, 성과 태그, 크로스 베뉴 아이덴티티로 따라갈 가치가 있는 트레이더를 발견."
+      },
+      "follow": {
+        "title": "따라갈 수 있게",
+        "desc": "듀얼 채널 실행: TG 위임 서명 + 셀프호스팅 제로키 daemon."
+      },
+      "operate": {
+        "title": "운영할 수 있게",
+        "desc": "섀도 모드, 3단 리스크 통제, admin 심사대로 운영 루프를 닫습니다."
+      }
+    }
+  },
+  "docs": {
+    "badge": "Sharpside Knowledge Base",
+    "title": "지식 베이스",
+    "subtitle": "제품·기술 문서의 통합 진입점. 사이드바는 MDX 파일시스템에서 자동 생성되며, 글에는 읽기 시간·태그·페이지 목차가 포함됩니다.",
+    "toc": "목차",
+    "onThisPage": "이 페이지",
+    "prevArticle": "이전",
+    "nextArticle": "다음",
+    "minutes": "분 소요",
+    "guide": "제품 가이드",
+    "guideDesc": "Sharpside 포지셔닝, 듀얼 채널 실행 모델, 트레이더 발견과 팔로우 생성 방법을 알아봅니다.",
+    "guideCta": "읽기 시작",
+    "technical": "기술 문서",
+    "technicalDesc": "환경 구성, 시스템 아키텍처, Venue 설계, 연동과 운영 매뉴얼. 기여자와 운영자용.",
+    "technicalCta": "기술 문서 열기",
+    "sections": {
+      "getting-started": "시작하기",
+      "architecture": "아키텍처",
+      "operations": "운영 매뉴얼"
+    }
+  },
+  "pages": {
+    "copy": {
+      "eyebrow": "Copy Trading",
+      "title": "트레이더를 찾고, 한 번에 팔로우",
+      "description": "리더보드와 성과 태그로 따라갈 가치가 있는 주소를 찾고, 채널과 사이징을 고른 뒤 시그널 실행 경로에 연결합니다.",
+      "bullets": [
+        "리더보드 / 트레이더 상세: ROI, 승률, 드로다운, 태그를 한눈에",
+        "팔로우 생성: Venue, 채널(TG / daemon), sizing 지정",
+        "체결 이력과 대시보드: 카피 결과를 추적 가능"
+      ],
+      "primary": "카피 가이드 읽기",
+      "secondary": "문서 들어가기"
+    },
+    "channels": {
+      "eyebrow": "Dual Channels",
+      "title": "듀얼 채널 실행, 수탁 경계를 분명히",
+      "description": "채널 A는 TG 위임 서명, 채널 B는 셀프호스팅 제로키 daemon. 둘 다 1급—필요에 맞게 선택하세요.",
+      "bullets": [
+        "채널 A: Telegram Bot으로 계정 연결·팔로우 생성, 플랫폼 서명 경계 명시",
+        "채널 B: 로컬 daemon + API key, 개인키는 기기 밖으로 나가지 않음",
+        "동일 계정에서 팔로우마다 채널을 섞어 쓸 수 있음"
+      ],
+      "primary": "듀얼 채널 알아보기",
+      "secondary": "TG Bot 핸드북"
+    },
+    "venues": {
+      "eyebrow": "Venues",
+      "title": "Venue를 1급 시민으로, 넓게 연결",
+      "description": "Polymarket을 먼저 출시. 마켓 매핑, 크로스 베뉴 아이덴티티, Registry로 이후 베뉴 확장에 통일 인터페이스를 마련합니다.",
+      "bullets": [
+        "crates/venues: 공통 trait + Polymarket adapter",
+        "venue-hub: ingest, mapping, identity, 성과 물화",
+        "Admin이 매핑과 identity를 심사해 잘못된 팔로우를 줄임"
+      ],
+      "primary": "Venue 설계 읽기",
+      "secondary": "시스템 아키텍처"
+    },
+    "risk": {
+      "eyebrow": "Risk & Ops",
+      "title": "운영 가능: 리스크 통제와 섀도 모드",
+      "description": "연속 손실 서킷브레이커, 티어/유저/Venue 3단 오버라이드, 슬리피지 보호, 그리고 섀도 모드로 제3자 지표와 비교합니다.",
+      "bullets": [
+        "copier는 실행 전 리스크 검사: 한도, 슬리피지, 서킷브레이커",
+        "섀도 모드: 내부 성과 vs 제3자 diff → metric_audit",
+        "Admin: 태그 규칙, 가시성, 핫키, 심사대"
+      ],
+      "primary": "섀도 모드 설명",
+      "secondary": "문서"
+    },
+    "tech": {
+      "eyebrow": "Developers",
+      "title": "기여자와 운영자를 위한 기술 입구",
+      "description": "Rust workspace, Gateway BFF, venue-hub, 듀얼 채널 실행. 로컬 구성과 연동 런북은 문서에 있습니다.",
+      "bullets": [
+        "환경 구성: Rust, Docker Postgres, e2e.sh",
+        "아키텍처: 서비스 토폴로지와 모듈 역할",
+        "런북: Polymarket 연동, TG Bot, 섀도 모드"
+      ],
+      "primary": "환경 구성",
+      "secondary": "시스템 아키텍처"
+    }
+  }
+}

@@ -1,0 +1,70 @@
+// Sharpside devcontainer 配置（Cursor/VSCode Remote-Containers）。
+// 对应"全部在 docker 跑镜像"的 dev/test 层：IDE workspace 整体跑在容器里，
+// agent 的 cargo build/test/clippy/fmt/deny 全部在容器内执行。
+//
+// 运行时层（8 个 app 服务 + PG/Redis/MinIO）仍由 infra/docker-compose.yml 编排，
+// 经 docker-outside-docker feature 让容器内 agent 调宿主 Docker daemon 起 infra：
+//   docker compose -f infra/docker-compose.yml up -d postgres redis minio
+// dev 阶段 8 个 app 服务用 `cargo run -p sharpside-<svc>` 跑（迭代快，不重建镜像）。
+//
+// 参考：
+//   - https://containers.dev/implementors/json_reference/
+//   - https://github.com/devcontainers/features/tree/main/src/docker-outside-docker
+{
+  "name": "sharpside-dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  // 远程用户：非 root，与根 Dockerfile runtime 的 nonroot(65532) 思路一致。
+  "remoteUser": "root",
+  // docker-outside-docker：容器内 docker/cli/compose 直连宿主 Docker daemon，
+  // 起 infra 兄弟容器（PG/Redis/MinIO），无需 DinD。
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-docker:1": {
+      "version": "latest",
+      "moby": false
+    }
+  },
+  // 跨会话持久化：cargo registry/git 缓存 + workspace target/，避免每次全量编译。
+  "mounts": [
+    {
+      "source": "sharpside-cargo-cache",
+      "target": "/usr/local/cargo",
+      "type": "volume"
+    },
+    {
+      "source": "sharpside-target-cache",
+      "target": "/workspaces/sharpside/target",
+      "type": "volume"
+    }
+  ],
+  // 容器创建后：拉依赖 + 确认工具链（rust-toolchain.toml 会自动同步 1.91.0+rustfmt+clippy）。
+  "postCreateCommand": "cargo --version && rustc --version && cargo fmt --version && cargo clippy --version",
+  // 端口转发：app 8080-8086 / infra 5432,6379,9000,9001。
+  "forwardPorts": [8080, 8081, 8082, 8083, 8084, 8085, 8086, 5432, 6379, 9000, 9001],
+  // 容器内继承的宿主环境变量（dev 联调用；.env/.env.local 仍由 docker-compose 读，
+  // 这里只是让容器内 cargo run 能拿到 DATABASE_URL 等）。
+  "containerEnv": {
+    "RUST_LOG": "info,sharpside=debug",
+    "RUST_BACKTRACE": "1"
+  },
+  "remoteEnv": {
+    "DATABASE_URL": "postgres://sharpside:sharpside_dev@localhost:5432/sharpside",
+    "VENUE_HUB_URL": "http://127.0.0.1:8081",
+    "FOLLOW_URL": "http://127.0.0.1:8082",
+    "COPIER_URL": "http://127.0.0.1:8083",
+    "ACCOUNT_URL": "http://127.0.0.1:8084",
+    "GATEWAY_URL": "http://127.0.0.1:8085"
+  },
+  // VSCode/Cursor 推荐扩展（Rust 生态）。
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer"],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.features": "all"
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+---
+title: "环境搭建"
+description: "克隆仓库、Rust 工具链、Docker Postgres，跑通本地开发环境"
+category: "technical"
+section: "getting-started"
+order: 1
+icon: "rocket"
+tags: ["setup", "rust", "docker"]
+lastUpdated: "2026-07-22"
+difficulty: "beginner"
+---
+
+## 前置要求
+
+<Callout type="info" title="系统要求">
+  推荐 Linux（Ubuntu 22.04+）或 macOS。需安装 Rust（见 `rust-toolchain.toml`）、Docker（Postgres）、以及本机可执行的 `cargo`。
+</Callout>
+
+## 克隆与构建
+
+```bash
+git clone <your-sharpside-remote> sharpside
+cd sharpside
+cargo build
+```
+
+Workspace 包含 `crates/*`、`services/*`、`apps/*`。首次构建会拉 crates.io 依赖。
+
+## 基础设施
+
+```bash
+# 启动 Postgres 等（以 infra 实际 compose 为准）
+docker compose -f infra/docker-compose.yml up -d
+```
+
+常用环境变量见根目录 `.env.example` / `.env.local`（勿提交密钥）。
+
+## 一键 E2E
+
+```bash
+bash infra/e2e.sh
+```
+
+会拉起 account / follow / copier / admin，断言双通道闭环与 admin 冒烟。
+
+## 本知识库网站
+
+```bash
+cd website
+npm install
+npm run dev
+```
+
+浏览器打开 `http://localhost:3000/docs`。

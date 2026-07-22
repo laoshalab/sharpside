@@ -1,0 +1,137 @@
+{
+  "nav": {
+    "home": "ホーム",
+    "docs": "ナレッジベース",
+    "toggleTheme": "テーマ切替",
+    "openMenu": "メニューを開く",
+    "copy": "コピー取引",
+    "channels": "デュアルチャネル",
+    "venues": "マルチ会場",
+    "risk": "リスク管理",
+    "tech": "開発者",
+    "launchApp": "アプリを開く"
+  },
+  "footer": {
+    "tagline": "マルチ会場予測市場のコピー取引 · Venue ファースト · デュアルチャネル実行",
+    "docs": "ナレッジベース",
+    "guide": "プロダクトガイド",
+    "architecture": "アーキテクチャ",
+    "product": "プロダクト",
+    "developers": "開発者",
+    "copy": "コピー取引",
+    "channels": "デュアルチャネル",
+    "venues": "マルチ会場",
+    "risk": "リスク管理",
+    "tech": "技術概要",
+    "setup": "環境構築",
+    "launchApp": "アプリを開く →"
+  },
+  "home": {
+    "heading": "マルチ会場予測市場",
+    "headingAccent": "コピードキュメント",
+    "subtitle": "プロダクトガイド、アーキテクチャ、運用マニュアルを一箇所に。Nexus ナレッジベースと同様：ファイルシステム MDX、三欄ドキュメントシェル、自動サイドバーと目次。",
+    "ctaPrimary": "ドキュメントへ",
+    "ctaSecondary": "アーキテクチャを読む",
+    "pillars": {
+      "reach": {
+        "title": "広くつなぐ",
+        "desc": "Venue を第一級市民に。Polymarket 先行、ネイティブな多会場拡張。"
+      },
+      "discover": {
+        "title": "見つけられる",
+        "desc": "ランキング、実績タグ、横断アイデンティティで、追う価値のあるトレーダーを発見。"
+      },
+      "follow": {
+        "title": "追い切れる",
+        "desc": "デュアルチャネル実行：TG 委任署名 + 自己ホストのゼロキー daemon。"
+      },
+      "operate": {
+        "title": "運用できる",
+        "desc": "シャドウモード、三層リスク管理、admin 審査台で運用ループを閉じる。"
+      }
+    }
+  },
+  "docs": {
+    "badge": "Sharpside Knowledge Base",
+    "title": "ナレッジベース",
+    "subtitle": "プロダクトと技術ドキュメントの統一入口。サイドバーは MDX ファイルシステムから自動生成。記事には読了時間、タグ、ページ内目次が付きます。",
+    "toc": "目次",
+    "onThisPage": "このページ",
+    "prevArticle": "前へ",
+    "nextArticle": "次へ",
+    "minutes": "分で読める",
+    "guide": "プロダクトガイド",
+    "guideDesc": "Sharpside の位置づけ、デュアルチャネル実行モデル、トレーダー発見とフォロー作成の流れを理解する。",
+    "guideCta": "読み始める",
+    "technical": "技術ドキュメント",
+    "technicalDesc": "環境構築、システムアーキテクチャ、Venue 設計、連携と運用マニュアル。貢献者と運用者向け。",
+    "technicalCta": "技術ドキュメントへ",
+    "sections": {
+      "getting-started": "はじめに",
+      "architecture": "アーキテクチャ",
+      "operations": "運用マニュアル"
+    }
+  },
+  "pages": {
+    "copy": {
+      "eyebrow": "Copy Trading",
+      "title": "トレーダーを見つけ、ワンクリックでフォロー",
+      "description": "ランキングと実績タグから追う価値のあるアドレスを見つけ、チャネルとサイジングを選んでシグナル実行に接続します。",
+      "bullets": [
+        "ランキング / トレーダー詳細：ROI、勝率、ドローダウン、タグが一目で分かる",
+        "フォロー作成：Venue、チャネル（TG / daemon）、サイジングを指定",
+        "約定履歴とダッシュボード：コピー結果を追跡可能"
+      ],
+      "primary": "コピーガイドを読む",
+      "secondary": "ドキュメントへ"
+    },
+    "channels": {
+      "eyebrow": "Dual Channels",
+      "title": "デュアルチャネル実行、カストディ境界を明確に",
+      "description": "チャネル A は TG 委任署名、チャネル B は自己ホストのゼロキー daemon。どちらも第一級—用途で選べます。",
+      "bullets": [
+        "チャネル A：Telegram Bot でアカウント連携とフォロー作成、代签境界を明示",
+        "チャネル B：ローカル daemon + API key、秘密鍵は端末外に出ない",
+        "同一アカウントでフォローごとにチャネルを混在可能"
+      ],
+      "primary": "デュアルチャネルを知る",
+      "secondary": "TG Bot ハンドブック"
+    },
+    "venues": {
+      "eyebrow": "Venues",
+      "title": "Venue を第一級市民に、広くつなぐ",
+      "description": "Polymarket を先行実装。市場マッピング、横断アイデンティティ、Registry で将来の会場拡張に統一インターフェースを用意。",
+      "bullets": [
+        "crates/venues：共通 trait + Polymarket adapter",
+        "venue-hub：ingest、mapping、identity、パフォーマンス物化",
+        "Admin がマッピングと identity を審査し、誤フォローを抑制"
+      ],
+      "primary": "Venue 設計を読む",
+      "secondary": "システムアーキテクチャ"
+    },
+    "risk": {
+      "eyebrow": "Risk & Ops",
+      "title": "運用できる：リスク管理とシャドウモード",
+      "description": "連敗サーキットブレーカー、階層/ユーザー/Venue の三段オーバーライド、スリッページ保護、さらにシャドウモードで第三者指標と比較。",
+      "bullets": [
+        "copier は実行前にリスク検査：上限、スリッページ、サーキットブレーカー",
+        "シャドウモード：内部パフォーマンス vs 第三者 diff → metric_audit",
+        "Admin：タグ規則、可視性、ホットキー、審査台"
+      ],
+      "primary": "シャドウモード説明",
+      "secondary": "ドキュメント"
+    },
+    "tech": {
+      "eyebrow": "Developers",
+      "title": "貢献者と運用者向けの技術入口",
+      "description": "Rust workspace、Gateway BFF、venue-hub、デュアルチャネル実行。ローカル構築と連携 Runbook はドキュメントにあります。",
+      "bullets": [
+        "環境構築：Rust、Docker Postgres、e2e.sh",
+        "アーキテクチャ：サービス構成とモジュール役割",
+        "Runbook：Polymarket 連携、TG Bot、シャドウモード"
+      ],
+      "primary": "環境構築",
+      "secondary": "システムアーキテクチャ"
+    }
+  }
+}

@@ -1,0 +1,27 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE
+/.idea
+/.vscode
+*.iml
+.DS_Store
+
+# 环境
+.env
+.env.local
+*.local.toml
+
+# Docker
+/infra/data
+
+# 日志
+*.log
+
+# 预编译二进制（543M，不入库）
+/.prebuilt-bin
+
+# Cursor 本地状态
+/.cursor

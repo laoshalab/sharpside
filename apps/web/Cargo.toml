@@ -1,0 +1,21 @@
+[package]
+name = "sharpside-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "用户前端：排行榜 / 详情 / 跟随 / 绩效（最小 web）"
+
+# MVP：axum 静态 + /api 反代 gateway（Leptos SSR+WASM 待有网络环境后落地）。
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["fs"] }
+reqwest.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

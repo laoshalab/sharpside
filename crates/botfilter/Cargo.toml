@@ -1,0 +1,16 @@
+[package]
+name = "sharpside-botfilter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bot / 做市过滤——纯函数规则可解释版（6 条规则，阈值可调可审计）"
+
+[dependencies]
+sharpside-shared.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+approx = "0.5"

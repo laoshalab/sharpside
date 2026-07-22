@@ -1,0 +1,27 @@
+[package]
+name = "sharpside-admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "运营后台 API：Venue×业务面二维菜单（映射/身份审核、热钥、标签阈值、可见性）"
+
+# MVP：axum HTTP API（Leptos SSR 前端待有网络环境后落地，前端可复用 web 的反代）。
+[dependencies]
+sharpside-shared.workspace = true
+sharpside-db.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["fs"] }
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+uuid.workspace = true

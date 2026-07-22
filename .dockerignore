@@ -1,0 +1,18 @@
+# 构建上下文瘦身：避免把 target/、本地数据、密钥、IDE 文件送进 builder
+target/
+target-docker/
+**/target/
+infra/data/
+data/
+.git/
+.github/
+.cursor/
+.vscode/
+.idea/
+*.log
+/tmp/
+.env
+.env.local
+.env.*.local
+# 保留 infra/.env.example（构建期不读，但 compose 用），不在此排除
+# 保留 vendor/spin（[patch.crates-io] spin = vendor/spin 构建必需）

@@ -1,0 +1,345 @@
+# Sharpside 全栈编排（基础设施 + 8 个服务端模块）。
+# 对应 docs/TECH_STACK_RUST.md §10 与 docs/ARCHITECTURE.md §3。
+#
+# 用法：
+#   docker compose -f infra/docker-compose.yml --env-file .env up -d            # 起全栈
+#   docker compose -f infra/docker-compose.yml --env-file .env up -d postgres    # 仅起 PG（兼容 infra/e2e.sh）
+#   docker compose -f infra/docker-compose.yml --env-file .env up -d --build     # 重建镜像
+#   docker compose -f infra/docker-compose.yml logs -f gateway
+#
+# 说明：
+#   - daemon 不在此编排（用户本地零密钥客户端，见 docs/CHANNEL_B），以二进制分发。
+#   - redis/minio 当前代码未接入（apalis/S3 待落地），保留启动以匹配「全部模块跑 docker」意图；
+#     不需要时加 `--scale redis=0 --scale minio=0` 或注释掉。
+#   - 5 个 DB 服务启动各自调用 sharpside_db::migrate()（include_str! 嵌入，幂等）。
+#     生产建议改单一 migrate init 容器；此处 venue-hub 先起，其余 DB 服务 depends_on 其 healthy，
+#     把迁移竞争收敛到单点。
+#   - 国内/受限网络：在 .env 设 POLYMARKET_HTTP_PROXY=http://host.docker.internal:7890
+#     （compose 已加 extra_hosts 让 host.docker.internal 在 Linux 可用）。
+
+# 公共字段锚点（x- 前缀为 compose 扩展字段，不视为服务）
+x-app-common: &app-common
+  restart: unless-stopped
+  env_file:
+    - ../.env
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # Linux 下访问宿主机代理（POLYMARKET_HTTP_PROXY）
+
+# 构建期代理 build-args（默认空=直连；.env 设 BUILD_HTTP_PROXY 走宿主代理）。
+# 用法：在服务 build.args 里 `<<: *build-proxy-args` 合并，再补 SERVICE/PORT。
+x-build-proxy-args: &build-proxy-args
+  HTTP_PROXY: "${BUILD_HTTP_PROXY:-}"
+  HTTPS_PROXY: "${BUILD_HTTPS_PROXY:-}"
+  NO_PROXY: "${BUILD_NO_PROXY:-localhost,127.0.0.1}"
+
+services:
+  # ═════════════════════ 基础设施 ═════════════════════
+  postgres:
+    image: postgres:16-alpine
+    container_name: sharpside-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sharpside
+      POSTGRES_PASSWORD: sharpside_dev
+      POSTGRES_DB: sharpside
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sharpside -d sharpside"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: sharpside-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: sharpside-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: sharpside
+      MINIO_ROOT_PASSWORD: sharpside_dev
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # 控制台
+    volumes:
+      - ./data/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ═════════════════════ 应用服务 ═════════════════════
+  # 统一构建：根 Dockerfile + build-arg SERVICE 选 bin；镜像名复用 SERVICE。
+  # 公共字段见顶部 x-app-common 锚点（env_file/extra_hosts/restart）。
+
+  # ── venue-hub：唯一 migrator，先起 ──
+  venue-hub:
+    <<: *app-common
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        <<: *build-proxy-args
+        SERVICE: sharpside-venue-hub
+        PORT: "8081"
+    image: sharpside-venue-hub:latest
+    container_name: sharpside-venue-hub
+    environment:
+      VENUE_HUB_LISTEN_ADDR: "0.0.0.0:8081"
+      DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  # ── follow ──
+  follow:
+    <<: *app-common
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        <<: *build-proxy-args
+        SERVICE: sharpside-follow
+        PORT: "8082"
+    image: sharpside-follow:latest
+    container_name: sharpside-follow
+    environment:
+      FOLLOW_LISTEN_ADDR: "0.0.0.0:8082"
+      DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
+      VENUE_HUB_URL: "http://venue-hub:8081"
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      venue-hub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # ── copier ──
+  copier:
+    <<: *app-common
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        <<: *build-proxy-args
+        SERVICE: sharpside-copier
+        PORT: "8083"
+    image: sharpside-copier:latest
+    container_name: sharpside-copier
+    environment:
+      COPIER_LISTEN_ADDR: "0.0.0.0:8083"
+      DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      venue-hub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # ── account ──
+  account:
+    <<: *app-common
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        <<: *build-proxy-args
+        SERVICE: sharpside-account
+        PORT: "8084"
+    image: sharpside-account:latest
+    container_name: sharpside-account
+    environment:
+      ACCOUNT_LISTEN_ADDR: "0.0.0.0:8084"
+      DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
+    ports:
+      - "8084:8084"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      venue-hub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8084/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # ── gateway（BFF + 鉴权 + 限流，反代四个上游）──
+  gateway:
+    <<: *app-common
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        <<: *build-proxy-args
+        SERVICE: sharpside-gateway
+        PORT: "8085"
+    image: sharpside-gateway:latest
+    container_name: sharpside-gateway
+    environment:
+      GATEWAY_LISTEN_ADDR: "0.0.0.0:8085"
+      VENUE_HUB_URL: "http://venue-hub:8081"
+      FOLLOW_URL: "http://follow:8082"
+      COPIER_URL: "http://copier:8083"
+      ACCOUNT_URL: "http://account:8084"
+    ports:
+      - "8085:8085"
+    depends_on:
+      venue-hub:
+        condition: service_healthy
+      follow:
+        condition: service_healthy
+      copier:
+        condition: service_healthy
+      account:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8085/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # ── admin（运营后台 API + 静态 UI，直连 PG）──
+  admin:
+    <<: *app-common
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        <<: *build-proxy-args
+        SERVICE: sharpside-admin
+        PORT: "8086"
+    image: sharpside-admin:latest
+    container_name: sharpside-admin
+    environment:
+      ADMIN_LISTEN_ADDR: "0.0.0.0:8086"
+      DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
+    ports:
+      - "8086:8086"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      venue-hub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8086/api/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # ── web（用户前端：静态树 + /api 反代 gateway）──
+  web:
+    <<: *app-common
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        <<: *build-proxy-args
+        SERVICE: sharpside-web
+        PORT: "8080"
+    image: sharpside-web:latest
+    container_name: sharpside-web
+    environment:
+      WEB_LISTEN_ADDR: "0.0.0.0:8080"
+      GATEWAY_URL: "http://gateway:8085"
+    ports:
+      # 宿主机 8080 常被本机服务（如 IPFS）占用；对外用 8070，容器内仍是 8080
+      - "8070:8080"
+    # 开发期挂载宿主机静态树：改 CSS/JS 后刷新浏览器即生效，无需 rebuild 镜像。
+    # 生产部署可去掉此 volumes（仍用镜像内 COPY 的静态文件）。
+    volumes:
+      - ../apps/web/static:/app/apps/web/static:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # ── tg-bot（teloxide 长轮询，无 HTTP 端口；单实例）──
+  tg-bot:
+    <<: *app-common
+    restart: "no"   # token 留空时优雅退出（exit 0），避免 unless-stopped 重启循环
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        <<: *build-proxy-args
+        SERVICE: sharpside-tg-bot
+        PORT: "0"
+    image: sharpside-tg-bot:latest
+    container_name: sharpside-tg-bot
+    environment:
+      ACCOUNT_URL: "http://account:8084"
+      FOLLOW_URL: "http://follow:8082"
+      VENUE_HUB_URL: "http://venue-hub:8081"
+    # 无 HTTP 监听，不映射端口、不加 healthcheck
+    depends_on:
+      account:
+        condition: service_healthy
+      follow:
+        condition: service_healthy
+      venue-hub:
+        condition: service_healthy
+
+# 端口约定：
+#   基础设施：PG 5432 / Redis 6379 / MinIO 9000+9001
+#   服务：web 宿主机 8070→容器 8080 / venue-hub 8081 / follow 8082 / copier 8083 / account 8084 / gateway 8085 / admin 8086
+#   tg-bot 无端口（长轮询）；daemon 不编排（用户本地）。

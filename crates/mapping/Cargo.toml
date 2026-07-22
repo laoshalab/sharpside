@@ -1,0 +1,19 @@
+[package]
+name = "sharpside-mapping"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "跨 Venue 市场映射（启发式匹配 + 单位换算 + 执行参数校验），纯逻辑易测"
+
+[dependencies]
+sharpside-shared.workspace = true
+sharpside-venues-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+approx = "0.5"

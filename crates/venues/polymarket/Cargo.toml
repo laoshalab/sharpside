@@ -1,0 +1,35 @@
+[package]
+name = "sharpside-venues-polymarket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Polymarket Venue adapter（signal + execution）：Data/Gamma/CLOB API 客户端 + Venue trait 实现"
+
+[dependencies]
+sharpside-shared.workspace = true
+sharpside-venues-core.workspace = true
+sharpside-kms.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# EIP-712 订单签名（链上签名下单）。最小子 crate 集（避免 alloy meta 拉 consensus/rpc-types）。
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
+alloy-sol-types.workspace = true
+alloy-primitives.workspace = true
+
+# CLOB V2 鉴权 + V2 Order EIP-712 + ERC-7739 POLY_1271 wrap（移植自生产 clob-auth，golden vector 验证）。
+sharpside-clob-auth.workspace = true
+hex.workspace = true
+
+# relayer poll_confirmed 用 tokio::time::sleep。
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

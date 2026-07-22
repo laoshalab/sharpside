@@ -1,0 +1,21 @@
+[package]
+name = "sharpside-venues-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Venue trait + VenueInfo + VenueRegistry + 通用类型（多平台抽象核心）"
+
+[dependencies]
+sharpside-shared.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+bitflags.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

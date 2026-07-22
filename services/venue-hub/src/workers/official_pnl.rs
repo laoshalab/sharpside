@@ -1,0 +1,328 @@
+//! official_pnl worker — 抓官方盈亏写回 `trader_performance.official_pnl`。
+//!
+//! 对应 `docs/PERFORMANCE_PIPELINE.md` / `docs/SHADOW_MODE.md`。
+//!
+//! 每个 tick 两阶段：
+//!
+//! **A. 排行榜（优先）**  
+//!   对每个 signal_source Venue（当前仅 Polymarket 提供榜上 `pnl`）：
+//!   1. 按官方周期（DAY/WEEK/MONTH/ALL）分页拉 `/v1/leaderboard?orderBy=PNL`
+//!   2. 命中已跟踪地址 → `upsert_official_pnl(..., overwrite=true)`，source=`polymarket_leaderboard`
+//!
+//! **B. `/value` delta 兜底（非榜地址）**  
+//!   Polymarket `/value` 只返当前估值快照（无历史）。worker 周期快照到
+//!   `trader_value_snapshot`，积累足够历史后算  
+//!   `delta = latest.value - earliest(>=cutoff).value`，作为官方口径近似
+//!   （含出入金；前端副标明示）。仅当尚无排行榜来源时写入，source=`polymarket_value_delta`。
+//!
+//! 周期映射（与 `polymarket::map_time_period` 对齐）：
+//!   - `1d`→DAY / `1w`→WEEK / `1m`→MONTH
+//!   - `1y`/`ytd`/`all`→ALL（同一 ALL 值写入三个 period 行；delta 各自按 cutoff）
+//!
+//! 官方 `pnl`（排行榜）/ `value` delta 与 sharpside 自算 `realized_pnl` 并存；
+//! 前端「盈亏」主显 `official_pnl`。偏差由 shadow mode `metric_audit` 审计。
+
+use crate::registry::enabled_signal_sources;
+use crate::state::AppState;
+use chrono::{DateTime, Datelike, Utc};
+use sharpside_db::queries::perf as perf_q;
+use sharpside_db::queries::traders as trader_q;
+use sharpside_venues_core::{LeaderboardQuery, VenueCapabilities};
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+/// 单周期分页拉取上限（10 页 × 50 = 500 名）。Top N 之外靠 `/value` delta 兜底。
+const PAGE_SIZE: u32 = 50;
+const MAX_PAGES: u32 = 10;
+
+/// 官方周期 → 写入的 sharpside period 键。
+/// Polymarket 排行榜只暴露 DAY/WEEK/MONTH/ALL 四档；ALL 同时覆盖 1y/ytd/all。
+const PERIOD_MAP: &[(&str, &[&str])] = &[
+    ("1d", &["1d"]),
+    ("1w", &["1w"]),
+    ("1m", &["1m"]),
+    ("1y", &["1y", "ytd", "all"]),
+];
+
+/// 各 period 的 delta 回看窗口（秒）。`all` 用极大窗口 ≈ 从首条快照起。
+fn period_cutoff(period: &str, now: DateTime<Utc>) -> DateTime<Utc> {
+    match period {
+        "1d" => now - chrono::Duration::days(1),
+        "1w" => now - chrono::Duration::days(7),
+        "1m" => now - chrono::Duration::days(30),
+        "1y" => now - chrono::Duration::days(365),
+        "ytd" => {
+            let y = now.year();
+            chrono::NaiveDate::from_ymd_opt(y, 1, 1)
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|n| n.and_utc())
+                .unwrap_or_else(|| now - chrono::Duration::days(365))
+        }
+        // all：足够早，value_delta_since 取窗口内最早点 ≈ 首条快照
+        _ => now - chrono::Duration::days(3650),
+    }
+}
+
+pub async fn run(state: AppState) {
+    let interval = state.config.workers.official_pnl_secs.max(1);
+    let mut ticker = tokio::time::interval(Duration::from_secs(interval));
+    loop {
+        ticker.tick().await;
+        if let Err(e) = run_once(&state).await {
+            tracing::warn!(error = %e, "official_pnl 本轮失败");
+        }
+    }
+}
+
+async fn run_once(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 已跟踪的 visible traders：只对这些地址写官方盈亏，避免为未跟踪交易者建空行。
+    let tracked: Vec<(String, String)> = trader_q::list_all_visible_traders(&state.db, 5000, 0)
+        .await?
+        .into_iter()
+        .map(|t| (t.platform, t.address))
+        .collect();
+
+    let now = Utc::now();
+
+    for platform in enabled_signal_sources(&state.config.venues) {
+        let Some(venue) = state.registry.get(platform) else {
+            continue;
+        };
+        if !venue
+            .info()
+            .capabilities
+            .contains(VenueCapabilities::SIGNAL_SOURCE)
+        {
+            continue;
+        }
+
+        // 该平台已跟踪地址集合（小写比较，Polymarket proxy_wallet 已是小写 0x hex）。
+        let tracked_addrs: HashSet<String> = tracked
+            .iter()
+            .filter(|(p, _)| p == platform.as_str())
+            .map(|(_, a)| a.to_lowercase())
+            .collect();
+        if tracked_addrs.is_empty() {
+            continue;
+        }
+
+        // ── A. 排行榜 ──
+        // period → 本轮命中地址（小写），供 B 阶段跳过已有榜上数据的地址。
+        let mut on_board: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for (tp, period_keys) in PERIOD_MAP {
+            let mut map: HashMap<String, (Option<f64>, Option<f64>)> = HashMap::new();
+            for page in 0..MAX_PAGES {
+                let offset = page * PAGE_SIZE;
+                let q = LeaderboardQuery {
+                    category: None, // OVERALL = 全分类，对齐官方 profile「盈亏」口径
+                    time_period: tp.to_string(),
+                    order_by: "pnl".into(),
+                    limit: PAGE_SIZE,
+                    offset,
+                };
+                let entries = match venue.leaderboard(q).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(
+                            platform = platform.as_str(),
+                            period = tp,
+                            page,
+                            error = %e,
+                            "official_pnl 拉排行榜失败"
+                        );
+                        break;
+                    }
+                };
+                if entries.is_empty() {
+                    break;
+                }
+                let page_len = entries.len();
+                for e in entries {
+                    // 仅当该 Venue 提供官方 pnl（Polymarket 有；Kalshi 等无则跳过）。
+                    if e.seed_pnl.is_none() && e.seed_vol.is_none() {
+                        continue;
+                    }
+                    map.insert(
+                        e.venue_trader_id.to_lowercase(),
+                        (e.seed_pnl, e.seed_vol),
+                    );
+                }
+                if (page_len as u32) < PAGE_SIZE {
+                    break;
+                }
+            }
+
+            let mut written = 0usize;
+            let mut board_set = HashSet::new();
+            for (addr_lower, (pnl, vol)) in &map {
+                if !tracked_addrs.contains(addr_lower) {
+                    continue;
+                }
+                for pk in *period_keys {
+                    if let Err(e) = perf_q::upsert_official_pnl(
+                        &state.db,
+                        platform.as_str(),
+                        addr_lower,
+                        pk,
+                        *pnl,
+                        *vol,
+                        "polymarket_leaderboard",
+                        true, // 排行榜始终覆盖
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            platform = platform.as_str(),
+                            address = addr_lower,
+                            period = pk,
+                            error = %e,
+                            "official_pnl 写回失败"
+                        );
+                    } else {
+                        written += 1;
+                        board_set.insert(addr_lower.clone());
+                    }
+                }
+            }
+            for pk in *period_keys {
+                on_board.insert((*pk).to_string(), board_set.clone());
+            }
+            tracing::info!(
+                platform = platform.as_str(),
+                period = tp,
+                fetched = map.len(),
+                written,
+                "official_pnl 排行榜本轮完成"
+            );
+        }
+
+        // ── B. `/value` 快照 + delta 兜底 ──
+        // 1) 拉一批该刷新快照的地址（从未快照或距上次 ≥ interval）。
+        let min_age = now - chrono::Duration::seconds(state.config.workers.official_pnl_secs as i64);
+        let batch = state.config.workers.official_value_batch.max(1);
+        let candidates = match perf_q::pick_value_snapshot_candidates(
+            &state.db,
+            platform.as_str(),
+            min_age,
+            batch,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    platform = platform.as_str(),
+                    error = %e,
+                    "official_pnl 选 /value 候选失败"
+                );
+                Vec::new()
+            }
+        };
+
+        let mut snap_ok = 0usize;
+        for addr in &candidates {
+            match venue.portfolio_value(addr).await {
+                Ok(v) => {
+                    if let Err(e) =
+                        perf_q::insert_value_snapshot(&state.db, platform.as_str(), addr, now, v)
+                            .await
+                    {
+                        tracing::warn!(
+                            platform = platform.as_str(),
+                            address = %addr,
+                            error = %e,
+                            "official_pnl 写 /value 快照失败"
+                        );
+                    } else {
+                        snap_ok += 1;
+                    }
+                }
+                Err(sharpside_venues_core::VenueError::Unsupported(_)) => {
+                    // Venue 不支持 /value，整阶段跳过。
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        platform = platform.as_str(),
+                        address = %addr,
+                        error = %e,
+                        "official_pnl 拉 /value 失败"
+                    );
+                }
+            }
+        }
+
+        // 2) 对未上榜的已跟踪地址，按周期算 delta 并 fallback 写回。
+        //    需要至少两个不同时点的快照；刚启动几轮可能写不出，属预期。
+        const ALL_PERIODS: &[&str] = &["1d", "1w", "1m", "1y", "ytd", "all"];
+        let mut delta_written = 0usize;
+        for addr in &tracked_addrs {
+            for pk in ALL_PERIODS {
+                // 本轮该 period 已有排行榜数据 → 跳过（排行榜优先）。
+                if on_board
+                    .get(*pk)
+                    .map(|s| s.contains(addr))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let since = period_cutoff(pk, now);
+                let delta = match perf_q::value_delta_since(
+                    &state.db,
+                    platform.as_str(),
+                    addr,
+                    since,
+                )
+                .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(
+                            platform = platform.as_str(),
+                            address = %addr,
+                            period = pk,
+                            error = %e,
+                            "official_pnl 算 value delta 失败"
+                        );
+                        continue;
+                    }
+                };
+                let Some(delta) = delta else {
+                    continue;
+                };
+                if let Err(e) = perf_q::upsert_official_pnl(
+                    &state.db,
+                    platform.as_str(),
+                    addr,
+                    pk,
+                    Some(delta),
+                    None, // /value 无 vol
+                    "polymarket_value_delta",
+                    false, // 不覆盖排行榜来源
+                )
+                .await
+                {
+                    tracing::warn!(
+                        platform = platform.as_str(),
+                        address = %addr,
+                        period = pk,
+                        error = %e,
+                        "official_pnl value_delta 写回失败"
+                    );
+                } else {
+                    delta_written += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            platform = platform.as_str(),
+            candidates = candidates.len(),
+            snap_ok,
+            delta_written,
+            "official_pnl /value 兜底本轮完成"
+        );
+    }
+    Ok(())
+}

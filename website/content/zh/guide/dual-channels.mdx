@@ -1,0 +1,44 @@
+---
+title: "双通道执行"
+description: "通道 A（TG 委托代签）与通道 B（自托管 daemon 零钥）如何分工、如何选型"
+category: "guide"
+section: "channels"
+order: 2
+icon: "git-branch"
+tags: ["channels", "tg", "daemon", "custody"]
+lastUpdated: "2026-07-22"
+---
+
+## 为什么是双通道
+
+预测市场跟单对**托管边界**极敏感。Sharpside 不把「非托管」当口号，而是把两条路径都做成一等公民：
+
+| 通道 | 面向 | 密钥位置 | 典型入口 |
+|------|------|----------|----------|
+| **A · TG** | 想少折腾的用户 | Deposit Wallet 由平台代签（明确委托） | Telegram Bot |
+| **B · daemon** | 要零钥的用户 | 私钥只在用户本机 | 本地 daemon + API key |
+
+## 通道 A · TG 委托
+
+- Bot 提供 `/start` 绑定、`/follow` 建跟随、`/traders` `/perf` 查询等命令。
+- Bot 用共享密钥换 JWT（`POST /auth/tg`），代表 TG 用户调用 follow / venue-hub。
+- 信号到达后，由平台侧 copier（通道 A 路径）完成代签下单。
+
+<Callout type="warning" title="托管边界">
+  通道 A 不是「平台完全碰不到钥」。UI 与文档必须诚实标注委托范围，避免与通道 B 混淆。
+</Callout>
+
+## 通道 B · 自托管 daemon
+
+- 用户在账户侧颁发 `daemon_api_key`。
+- 本机 daemon 拉取待执行信号，**本地签名**后回传成交结果。
+- 平台永不持有该用户 Venue 私钥。
+
+## 选型建议
+
+1. **先验证策略** → 任意通道 + `dry_run`。
+2. **要最低摩擦** → 通道 A。
+3. **要零钥** → 通道 B。
+4. **同一账户可混用** → 不同跟随关系可指定不同 channel。
+
+下一步：[跟单入门](/docs/guide/copy-trading) · [TG Bot 手册](/docs/technical/operations/tg-bot)。

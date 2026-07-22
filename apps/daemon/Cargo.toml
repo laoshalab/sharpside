@@ -1,0 +1,23 @@
+[package]
+name = "sharpside-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "用户本地零密钥客户端（通道 B）"
+
+[dependencies]
+sharpside-shared.workspace = true
+sharpside-venues-polymarket.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true

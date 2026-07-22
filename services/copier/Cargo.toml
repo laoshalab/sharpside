@@ -1,0 +1,49 @@
+[package]
+name = "sharpside-copier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "通道 × Venue 执行 + 风控（消费 copy_queue → 查映射 → 下单）"
+
+[dependencies]
+sharpside-shared.workspace = true
+sharpside-venues-core.workspace = true
+sharpside-venues-polymarket.workspace = true
+sharpside-kms.workspace = true
+sharpside-mapping.workspace = true
+sharpside-db.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+rust_decimal.workspace = true
+jsonwebtoken.workspace = true
+# daemon_api_key 校验：argon2（新 key）+ 兼容旧 PBKDF2 哈希（sha2/hmac）。
+argon2.workspace = true
+rand.workspace = true
+sha2 = "0.10"
+hmac = "0.12"
+# 阶段2 真钱集成测试（#[ignore]）用 alloy_primitives::Address 调 L1 deriveApiKey / 撤单。
+alloy-primitives.workspace = true
+alloy-signer-local.workspace = true
+# 真实跟单 e2e 测试（#[ignore]）用 reqwest 调 follow /internal/signals。
+reqwest.workspace = true
+
+# 设计说明：
+# - 不依赖 apalis/redis（未缓存）：通道 A 执行 worker 用 tokio::spawn + interval 轮询
+#   account.copy_order WHERE status='pending' AND channel='tg'；通道 B 由 daemon 拉取（HTTP）。
+# - dry_run 模式（默认 true）：不调 Venue::place_order，合成成交回报写 copy_execution，
+#   便于离线/无凭证环境跑通闭环。有凭证与网络环境后置 false。
+# - KMS：DevKms（env 明文，dev）由 copier 启动时注入；生产换真 AwsKms（见 sharpside-kms stub）。

@@ -1,0 +1,137 @@
+{
+  "nav": {
+    "home": "首页",
+    "copy": "跟单",
+    "channels": "双通道",
+    "venues": "多平台",
+    "risk": "风控",
+    "tech": "开发者",
+    "docs": "知识库",
+    "launchApp": "打开 App",
+    "toggleTheme": "切换主题",
+    "openMenu": "打开菜单"
+  },
+  "footer": {
+    "tagline": "多平台预测市场跟单 · Venue 一等公民 · 双通道执行",
+    "product": "产品",
+    "developers": "开发者",
+    "docs": "知识库",
+    "guide": "产品指南",
+    "architecture": "架构",
+    "copy": "跟单",
+    "channels": "双通道",
+    "venues": "多平台",
+    "risk": "风控",
+    "tech": "技术概览",
+    "setup": "环境搭建",
+    "launchApp": "打开 App →"
+  },
+  "home": {
+    "heading": "多平台预测市场",
+    "headingAccent": "跟单知识库",
+    "subtitle": "产品指南、架构说明与运维手册集中在一处。结构对齐 Nexus 知识库：文件系统 MDX、三栏文档壳、自动侧栏与目录。",
+    "ctaPrimary": "进入知识库",
+    "ctaSecondary": "阅读架构",
+    "pillars": {
+      "reach": {
+        "title": "接得广",
+        "desc": "Venue 一等公民，Polymarket 先行，多平台原生扩展。"
+      },
+      "discover": {
+        "title": "找得到",
+        "desc": "排行榜、绩效标签、跨平台身份，帮你发现值得跟随的交易者。"
+      },
+      "follow": {
+        "title": "跟得上",
+        "desc": "双通道执行：TG 委托代签 + 自托管 daemon 零钥。"
+      },
+      "operate": {
+        "title": "运营得动",
+        "desc": "影子模式、三级风控、admin 审核台，把运营闭环跑通。"
+      }
+    }
+  },
+  "docs": {
+    "badge": "Sharpside Knowledge Base",
+    "title": "知识库",
+    "subtitle": "产品与技术文档统一入口。侧栏由 MDX 文件系统自动生成，文章带阅读时长、标签与本页目录。",
+    "toc": "目录",
+    "onThisPage": "本页目录",
+    "prevArticle": "上一篇",
+    "nextArticle": "下一篇",
+    "minutes": "分钟阅读",
+    "guide": "产品指南",
+    "guideDesc": "了解 Sharpside 定位、双通道执行模型，以及如何发现交易者并创建跟随。",
+    "guideCta": "开始阅读",
+    "technical": "技术文档",
+    "technicalDesc": "环境搭建、系统架构、Venue 设计、联调与运维手册，面向贡献者与运维。",
+    "technicalCta": "进入技术文档",
+    "sections": {
+      "getting-started": "快速开始",
+      "architecture": "架构",
+      "operations": "运维手册"
+    }
+  },
+  "pages": {
+    "copy": {
+      "eyebrow": "Copy Trading",
+      "title": "发现交易者，一键跟随",
+      "description": "从排行榜与绩效标签找到值得跟随的地址，选择通道与仓位模式后接入信号执行链路。",
+      "bullets": [
+        "排行榜 / 交易者详情：ROI、胜率、回撤与标签一目了然",
+        "创建跟随：指定 Venue、通道（TG / daemon）与 sizing",
+        "成交历史与仪表盘：跟单结果可追溯"
+      ],
+      "primary": "阅读跟单指南",
+      "secondary": "进入知识库"
+    },
+    "channels": {
+      "eyebrow": "Dual Channels",
+      "title": "双通道执行，托管边界说清楚",
+      "description": "通道 A 走 TG 委托代签，通道 B 走自托管 daemon 零钥。两条路径都是一等公民，按需求选型。",
+      "bullets": [
+        "通道 A：Telegram Bot 绑定账户、创建跟随，平台代签边界明确标注",
+        "通道 B：本机 daemon + API key，私钥不出用户设备",
+        "同一账户可为不同跟随关系混用通道"
+      ],
+      "primary": "了解双通道",
+      "secondary": "TG Bot 手册"
+    },
+    "venues": {
+      "eyebrow": "Venues",
+      "title": "Venue 一等公民，接得广",
+      "description": "Polymarket 先行落地；市场映射、跨平台身份与 Registry 为后续场所扩展预留统一接口。",
+      "bullets": [
+        "crates/venues：统一 trait + Polymarket adapter",
+        "venue-hub：ingest、mapping、identity、绩效物化",
+        "Admin 审核映射与身份，降低错误跟单风险"
+      ],
+      "primary": "阅读 Venue 设计",
+      "secondary": "系统架构"
+    },
+    "risk": {
+      "eyebrow": "Risk & Ops",
+      "title": "运营得动：风控与影子模式",
+      "description": "连续亏损熔断、档位/用户/Venue 三级覆盖、滑点保护，再加影子模式对比第三方指标。",
+      "bullets": [
+        "copier 执行前过风控：上限、滑点、熔断",
+        "影子模式：内部绩效 vs 第三方 diff → metric_audit",
+        "Admin：标签规则、可见性、热钥与审核台"
+      ],
+      "primary": "影子模式说明",
+      "secondary": "知识库"
+    },
+    "tech": {
+      "eyebrow": "Developers",
+      "title": "给贡献者与运维的技术入口",
+      "description": "Rust workspace、Gateway BFF、venue-hub 与双通道执行链路。本地搭建与联调手册都在知识库。",
+      "bullets": [
+        "环境搭建：Rust、Docker Postgres、e2e.sh",
+        "架构：服务拓扑与模块职责",
+        "Runbook：Polymarket 联调、TG Bot、影子模式"
+      ],
+      "primary": "环境搭建",
+      "secondary": "系统架构"
+    }
+  }
+}

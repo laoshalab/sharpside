@@ -1,0 +1,753 @@
+{
+  "nav.copy": {
+    "de": "Kopieren",
+    "ru": "Копирование",
+    "ar": "نسخ"
+  },
+  "nav.portfolio": {
+    "de": "Depot",
+    "ru": "Портфель",
+    "ar": "المحفظة"
+  },
+  "nav.watchlist": {
+    "de": "Beobachtungsliste",
+    "ru": "Список наблюдения",
+    "ar": "قائمة المراقبة"
+  },
+  "nav.dashboard": {
+    "de": "Übersicht",
+    "ru": "Панель",
+    "ar": "لوحة التحكم"
+  },
+  "nav.portfolioPage": {
+    "de": "Depot",
+    "ru": "Портфель",
+    "ar": "المحفظة"
+  },
+  "nav.wallet": {
+    "de": "Geldbörse",
+    "ru": "Кошелёк",
+    "ar": "المحفظة"
+  },
+  "home.venue.capExecution": {
+    "de": "Ausführung",
+    "ru": "Исполнение",
+    "ar": "تنفيذ"
+  },
+  "home.venue.liveBadge": {
+    "de": "Live",
+    "ru": "В эфире",
+    "ar": "مباشر"
+  },
+  "home.hot.colTrader": {
+    "de": "Trader",
+    "ru": "Трейдер",
+    "ar": "المتداول"
+  },
+  "leaderboard.colTrader": {
+    "de": "Trader",
+    "ru": "Трейдер",
+    "ar": "المتداول"
+  },
+  "leaderboard.colSpark": {
+    "de": "Diagramm",
+    "ru": "График",
+    "ar": "الرسم"
+  },
+  "leaderboard.colDrawdown": {
+    "de": "Drawdown",
+    "ru": "Просадка",
+    "ar": "التراجع"
+  },
+  "leaderboard.colTags": {
+    "de": "Tags",
+    "ru": "Теги",
+    "ar": "الوسوم"
+  },
+  "leaderboard.colBot": {
+    "de": "Bot",
+    "ru": "Бот",
+    "ar": "روبوت"
+  },
+  "leaderboard.verifiedMark": {
+    "de": "Verifiziert",
+    "ru": "Верифицирован",
+    "ar": "موثّق"
+  },
+  "leaderboard.sort.max_drawdown": {
+    "de": "Drawdown",
+    "ru": "Просадка",
+    "ar": "التراجع"
+  },
+  "leaderboard.category.ESPORTS": {
+    "de": "E-Sport",
+    "ru": "Киберспорт",
+    "ar": "الرياضات الإلكترونية"
+  },
+  "leaderboard.category.TECH": {
+    "de": "Technik",
+    "ru": "Технологии",
+    "ar": "التكنولوجيا"
+  },
+  "leaderboard.hotMark": {
+    "ru": "Горячий ключ",
+    "ar": "مفتاح ساخن"
+  },
+  "siwe.injectedWallet": {
+    "de": "Injected Wallet",
+    "ru": "Injected wallet",
+    "ar": "محفظة محقونة"
+  },
+  "settings.hubCredTitle": {
+    "de": "Venue-Zugangsdaten",
+    "ru": "Учётные данные Venue",
+    "ar": "بيانات اعتماد Venue"
+  },
+  "settings.hubDelTitle": {
+    "de": "Delegierung",
+    "ru": "Делегирование",
+    "ar": "التفويض"
+  },
+  "settings.credTitle": {
+    "de": "Venue-Zugangsdaten",
+    "ru": "Учётные данные Venue",
+    "ar": "بيانات اعتماد Venue"
+  },
+  "settings.proxyAddress": {
+    "de": " · Proxy: {address}",
+    "ru": " · Прокси: {address}",
+    "ar": " · وكيل: {address}"
+  },
+  "wallet.pageTitle": {
+    "de": "Geldbörse",
+    "ru": "Кошелёк",
+    "ar": "المحفظة"
+  },
+  "wallet.balanceLive": {
+    "de": "Live (CLOB /balance-allowance)",
+    "ru": "Онлайн (CLOB /balance-allowance)",
+    "ar": "مباشر (CLOB /balance-allowance)"
+  },
+  "wallet.colStatus": {
+    "de": "Zustand",
+    "ru": "Статус",
+    "ar": "الحالة"
+  },
+  "wallet.sourceAuto": {
+    "de": "Automatisch",
+    "ru": "Авто",
+    "ar": "تلقائي"
+  },
+  "follows.filter": {
+    "de": "Filtern",
+    "ru": "Фильтр",
+    "ar": "تصفية"
+  },
+  "follows.pause": {
+    "de": "⏸ Pausieren",
+    "ru": "⏸ Пауза",
+    "ar": "⏸ إيقاف مؤقت"
+  },
+  "follows.upgradePro": {
+    "ru": "Обновить до Pro+",
+    "ar": "ترقية Pro+"
+  },
+  "follows.slotsPro": {
+    "ru": "Pro+ слоты {used} / ∞",
+    "ar": "فتحات Pro+ {used} / ∞"
+  },
+  "home.channels.ctaUpgradePro": {
+    "ru": "Обновить до Pro+",
+    "ar": "ترقية Pro+"
+  },
+  "dashboard.pageTitle": {
+    "de": "Übersicht",
+    "ru": "Панель",
+    "ar": "لوحة التحكم"
+  },
+  "dashboard.watchlistCount": {
+    "de": "Beobachtungsliste",
+    "ru": "Список наблюдения",
+    "ar": "قائمة المراقبة"
+  },
+  "dashboard.portfolioTitle": {
+    "de": "Depot",
+    "ru": "Портфель",
+    "ar": "المحفظة"
+  },
+  "dashboard.kpiTradeCount": {
+    "de": "Trades",
+    "ru": "Сделки",
+    "ar": "الصفقات"
+  },
+  "dashboard.colStatus": {
+    "de": "Zustand",
+    "ru": "Статус",
+    "ar": "الحالة"
+  },
+  "dashboard.totalCopyOrders": {
+    "ru": "Copy-ордера",
+    "ar": "أوامر النسخ"
+  },
+  "portfolio.pageTitle": {
+    "de": "Depot",
+    "ru": "Портфель",
+    "ar": "المحفظة"
+  },
+  "portfolio.kpiTradeCount": {
+    "de": "Trades",
+    "ru": "Сделки",
+    "ar": "الصفقات"
+  },
+  "portfolio.gotoCredentials": {
+    "de": "Bereitstellen →",
+    "ru": "Настроить →",
+    "ar": "إعداد →"
+  },
+  "portfolio.depositWallet": {
+    "de": "Vermögen · Deposit Wallet",
+    "ru": "Активы · Deposit Wallet",
+    "ar": "الأصول · Deposit Wallet"
+  },
+  "portfolio.ownerEoa": {
+    "de": "Handel · Owner EOA",
+    "ru": "Торговля · Owner EOA",
+    "ar": "التداول · Owner EOA"
+  },
+  "trader.tagHot": {
+    "de": "Beliebt",
+    "ru": "Горячий",
+    "ar": "ساخن"
+  },
+  "trader.officialPnl": {
+    "de": "PnL (offiziell)",
+    "ru": "PnL (официальный)",
+    "ar": "PnL (رسمي)"
+  },
+  "trader.realizedSelfSub": {
+    "de": "Sharpside lokale Wiedergabe",
+    "ru": "Локальный replay Sharpside",
+    "ar": "إعادة تشغيل Sharpside محلياً"
+  },
+  "trader.positionCount": {
+    "de": "Trades",
+    "ru": "Сделки",
+    "ar": "الصفقات"
+  },
+  "trader.botNormal": {
+    "de": "Normal",
+    "ru": "Нормальный",
+    "ar": "طبيعي"
+  },
+  "subscription.upgrade": {
+    "de": "Pro+ upgraden",
+    "ru": "Обновить до Pro+",
+    "ar": "ترقية Pro+"
+  },
+  "credentials.title": {
+    "de": "Venue-Zugangsdaten",
+    "ru": "Учётные данные Venue",
+    "ar": "بيانات اعتماد Venue"
+  },
+  "credentials.kindFallback": {
+    "de": "Credential · {kind}",
+    "ru": "Учётные данные · {kind}",
+    "ar": "بيانات اعتماد · {kind}"
+  },
+  "credentials.live": {
+    "ru": "✅ Настроено (онлайн)",
+    "ar": "✅ تم الإعداد (متصل)"
+  },
+  "credentials.offline": {
+    "ru": "⚠ Настроено (оффлайн)",
+    "ar": "⚠ تم الإعداد (غير متصل)"
+  },
+  "credentials.configured": {
+    "ru": "✅ Настроено",
+    "ar": "✅ مُعدّ"
+  },
+  "credentials.notProvisioned": {
+    "ru": "⚠ Не настроено",
+    "ar": "⚠ غير مُعدّ"
+  },
+  "credentials.stepperTitle": {
+    "ru": "Машина состояний настройки",
+    "ar": "آلة حالات الإعداد"
+  },
+  "credentials.stepGenerateOwner": {
+    "ru": "Сгенерировать owner EOA",
+    "ar": "إنشاء owner EOA"
+  },
+  "credentials.stepKms": {
+    "ru": "KMS-шифрование приватного ключа",
+    "ar": "تشفير KMS للمفتاح الخاص"
+  },
+  "credentials.stepBalance": {
+    "ru": "Синхронизация баланса",
+    "ar": "مزامنة الرصيد"
+  },
+  "credentials.stepPersist": {
+    "ru": "Сохранение",
+    "ar": "حفظ"
+  },
+  "credentials.viewDelegation": {
+    "ru": "Посмотреть делегирование →",
+    "ar": "عرض التفويض →"
+  },
+  "credentials.reprovision": {
+    "ru": "Пересоздать",
+    "ar": "إعادة الإعداد"
+  },
+  "credentials.reprovisionSuccess": {
+    "ru": "Пересоздано",
+    "ar": "تمت إعادة الإعداد"
+  },
+  "credentials.manifoldDesc": {
+    "ru": "Только сигнал · API key",
+    "ar": "إشارة فقط · API key"
+  },
+  "credentials.configureLocked": {
+    "ru": "Настроить ({phase}) 🔒",
+    "ar": "إعداد ({phase}) 🔒"
+  },
+  "credentials.daemonManage": {
+    "ru": "Управление daemon key →",
+    "ar": "إدارة daemon key →"
+  },
+  "delegation.title": {
+    "de": "Delegierung",
+    "ru": "Делегирование",
+    "ar": "التفويض"
+  },
+  "delegation.modeOnline": {
+    "de": "Online",
+    "ru": "Онлайн",
+    "ar": "متصل"
+  },
+  "delegation.modeOffline": {
+    "de": "Offline (dev)",
+    "ru": "Оффлайн (dev)",
+    "ar": "غير متصل (dev)"
+  },
+  "delegation.reprovision": {
+    "de": "Neu bereitstellen",
+    "ru": "Пересоздать",
+    "ar": "إعادة الإعداد"
+  },
+  "delegation.reprovisionSuccess": {
+    "de": "Neu bereitgestellt",
+    "ru": "Пересоздано",
+    "ar": "تمت إعادة الإعداد"
+  },
+  "delegation.revokeTitle": {
+    "de": "Delegation widerrufen",
+    "ru": "Отозвать делегирование",
+    "ar": "إلغاء التفويض"
+  },
+  "delegation.revoke": {
+    "de": "Delegation widerrufen",
+    "ru": "Отозвать делегирование",
+    "ar": "إلغاء التفويض"
+  },
+  "delegation.revokePhase2Note": {
+    "de": "Self-Service-Widerruf kommt in Phase 2; bei Notfällen Support kontaktieren.",
+    "ru": "Самостоятельный отзыв появится в Phase 2; в экстренных случаях обратитесь в поддержку.",
+    "ar": "الإلغاء الذاتي سيُتاح في Phase 2؛ للطوارئ تواصل مع الدعم."
+  },
+  "delegation.selfCustodyTitle": {
+    "de": "Upgrade auf Non-Custodial (Phase 2)",
+    "ru": "Переход на некастодиальный режим (Phase 2)",
+    "ar": "الترقية إلى غير وصائي (Phase 2)"
+  },
+  "delegation.selfCustodyDesc": {
+    "de": "Jetzt: delegierter Handel (Plattform hält Owner-Key) → Ziel: Non-Custodial (Sie halten Owner-Key; Plattform leitet Signaturen weiter)",
+    "ru": "Сейчас: делегированная торговля (платформа хранит owner key) → Цель: некастодиальная (вы храните owner key; платформа только передаёт подписи)",
+    "ar": "الآن: تداول مفوض (المنصة تحتفظ بمفتاح owner) ← الهدف: غير وصائي (أنت تحتفظ بمفتاح owner؛ المنصة تنقل التوقيعات فقط)"
+  },
+  "delegation.provisionNow": {
+    "de": "Jetzt bereitstellen",
+    "ru": "Настроить сейчас",
+    "ar": "إعداد الآن"
+  },
+  "delegation.provisionSuccess": {
+    "ru": "Настроено",
+    "ar": "تم الإعداد"
+  },
+  "delegation.loadError": {
+    "de": "Laden fehlgeschlagen: {message}",
+    "ru": "Ошибка загрузки: {message}",
+    "ar": "فشل التحميل: {message}"
+  },
+  "delegation.whatIsCustody": {
+    "de": "  ⓘ Was ist das Custody-Level?",
+    "ru": "  ⓘ Что такое уровень хранения?",
+    "ar": "  ⓘ ما هو مستوى الحفظ؟"
+  },
+  "delegation.notifyMigration": {
+    "ru": "Уведомить о миграции",
+    "ar": "أبلغني بالترحيل"
+  },
+  "delegation.notifySuccess": {
+    "de": "Zur Phase-2-Migrations-Benachrichtigungsliste hinzugefügt",
+    "ru": "Добавлено в список уведомлений о миграции Phase 2",
+    "ar": "أُضيف إلى قائمة إشعارات ترحيل Phase 2"
+  },
+  "delegation.notProvisioned": {
+    "ru": "Делегирование Polymarket не настроено",
+    "ar": "تفويض Polymarket غير مُعدّ"
+  },
+  "delegation.channelADesc": {
+    "de": "Kanal A: Deposit Wallet (ERC-1967) hält Assets + Plattform KMS signiert Trades. Phase 2 gibt Handelsrechte zurück.",
+    "ru": "Канал A: Deposit Wallet (ERC-1967) хранит активы + платформа KMS подписывает сделки. Phase 2 вернёт торговые права.",
+    "ar": "القناة A: Deposit Wallet (ERC-1967) تحتفظ بالأصول + المنصة KMS توقّع الصفقات. Phase 2 تُعيد حقوق التداول."
+  },
+  "daemonKey.title": {
+    "de": "daemon API key (Kanal B)",
+    "ru": "daemon API key (канал B)",
+    "ar": "daemon API key (القناة B)"
+  },
+  "daemonKey.statusLabel": {
+    "de": "Status:",
+    "ru": "Статус:",
+    "ar": "الحالة:"
+  },
+  "daemonKey.statusIssued": {
+    "ru": "✅ Выдан",
+    "ar": "✅ صادر"
+  },
+  "daemonKey.statusNotIssued": {
+    "ru": "❌ Не выдан",
+    "ar": "❌ غير صادر"
+  },
+  "daemonKey.lastRotated": {
+    "de": "Zuletzt rotiert: {datetime}",
+    "ru": "Последняя ротация: {datetime}",
+    "ar": "آخر تدوير: {datetime}"
+  },
+  "daemonKey.description": {
+    "ru": "Используется каналом B (self-hosted daemon) для получения инструкций копирования. Платформа хранит только hash; plaintext показывается один раз.",
+    "ar": "يستخدمها القناة B (self-hosted daemon) لسحب تعليمات النسخ. المنصة تخزّن hash فقط؛ plaintext يُعرض مرة واحدة."
+  },
+  "daemonKey.rotate": {
+    "de": "Key rotieren",
+    "ru": "Сменить ключ",
+    "ar": "تدوير المفتاح"
+  },
+  "daemonKey.issue": {
+    "de": "Key ausstellen",
+    "ru": "Выдать ключ",
+    "ar": "إصدار مفتاح"
+  },
+  "daemonKey.rotateConfirm": {
+    "ru": "Ротация немедленно аннулирует старый ключ. Обновите все конфиги daemon. Продолжить?",
+    "ar": "التدوير يلغي المفتاح القديم فوراً. حدّث جميع إعدادات daemon. متابعة؟"
+  },
+  "daemonKey.issueConfirm": {
+    "ru": "Выдать daemon API key?",
+    "ar": "إصدار daemon API key؟"
+  },
+  "daemonKey.oneTimeTitle": {
+    "de": "daemon API key (einmalig)",
+    "ru": "daemon API key (показывается один раз)",
+    "ar": "daemon API key (يُعرض مرة واحدة)"
+  },
+  "daemonKey.installTitle": {
+    "de": "Daemon-Installation",
+    "ru": "Установка daemon",
+    "ar": "تثبيت daemon"
+  },
+  "daemonKey.stepDownload": {
+    "ru": "Скачать бинарник daemon для вашей платформы",
+    "ar": "تنزيل ملف daemon لمنصتك"
+  },
+  "daemonKey.downloadPending": {
+    "de": "(Build-Artefakt ausstehend)",
+    "ru": "(сборка ожидается)",
+    "ar": "(النسخة قيد الإعداد)"
+  },
+  "daemonKey.stepConfigure": {
+    "de": ".env konfigurieren",
+    "ru": "Настроить .env",
+    "ar": "تهيئة .env"
+  },
+  "daemonKey.stepRun": {
+    "de": "Daemon starten",
+    "ru": "Запустить daemon",
+    "ar": "تشغيل daemon"
+  },
+  "daemonKey.docsLink": {
+    "de": "Vollständige Docs → (demnächst)",
+    "ru": "Полная документация → (скоро)",
+    "ar": "الوثائق الكاملة → (قريباً)"
+  },
+  "watchlist.title": {
+    "de": "Beobachtungsliste",
+    "ru": "Список наблюдения",
+    "ar": "قائمة المراقبة"
+  },
+  "watchlist.titleCount": {
+    "de": "Beobachtungsliste ({count})",
+    "ru": "Список наблюдения ({count})",
+    "ar": "قائمة المراقبة ({count})"
+  },
+  "watchlist.loadError": {
+    "de": "Laden fehlgeschlagen: {message}",
+    "ru": "Ошибка загрузки: {message}",
+    "ar": "فشل التحميل: {message}"
+  },
+  "watchlist.addFailed": {
+    "de": "Hinzufügen zur Beobachtungsliste fehlgeschlagen",
+    "ru": "Не удалось добавить в список наблюдения",
+    "ar": "فشل الإضافة لقائمة المراقبة"
+  },
+  "watchlist.empty": {
+    "de": "Noch keine beobachteten Trader",
+    "ru": "Пока нет наблюдаемых трейдеров",
+    "ar": "لا متداولين مراقَبين بعد"
+  },
+  "watchlist.identityPrefix": {
+    "de": "Identität {id}…",
+    "ru": "Идентичность {id}…",
+    "ar": "الهوية {id}…"
+  },
+  "watchlist.watchingChip": {
+    "de": "👁 Beobachtet",
+    "ru": "👁 Наблюдаю",
+    "ar": "👁 مراقَب"
+  },
+  "watchlist.perfLoading": {
+    "de": "Performance wird geladen…",
+    "ru": "Загрузка показателей…",
+    "ar": "جاري تحميل الأداء…"
+  },
+  "watchlist.noPerf": {
+    "de": "Noch keine Performance",
+    "ru": "Пока нет показателей",
+    "ar": "لا أداء بعد"
+  },
+  "watchlist.realized": {
+    "de": "Realisiert",
+    "ru": "Реализовано",
+    "ar": "محقّق"
+  },
+  "watchlist.perfUnavailable": {
+    "de": "Performance nicht verfügbar",
+    "ru": "Показатели недоступны",
+    "ar": "الأداء غير متاح"
+  },
+  "watchlist.identityPerfPending": {
+    "de": "Cross-Venue-Identitäts-Performance (Endpoint ausstehend)",
+    "ru": "Показатели cross-venue идентичности (endpoint в разработке)",
+    "ar": "أداء الهوية cross-venue (نقطة النهاية قيد الانتظار)"
+  },
+  "watchlist.upgradeToFollow": {
+    "de": "⇧ Zum Follow upgraden",
+    "ru": "⇧ Обновить до follow",
+    "ar": "⇧ ترقية للمتابعة"
+  },
+  "watchlist.remove": {
+    "de": "🗑 Nicht mehr beobachten",
+    "ru": "🗑 Убрать из наблюдения",
+    "ar": "🗑 إلغاء المراقبة"
+  },
+  "watchlist.removeConfirm": {
+    "de": "Diesen Watch-Eintrag entfernen?",
+    "ru": "Удалить этот элемент наблюдения?",
+    "ar": "إزالة عنصر المراقبة هذا؟"
+  },
+  "copyHistory.title": {
+    "de": "Trade-Historie",
+    "ru": "История сделок",
+    "ar": "سجل الصفقات"
+  },
+  "copyHistory.follow": {
+    "de": "Follow",
+    "ru": "Follow",
+    "ar": "متابعة"
+  },
+  "copyHistory.status": {
+    "de": "Zustand",
+    "ru": "Статус",
+    "ar": "الحالة"
+  },
+  "copyHistory.last1d": {
+    "de": "Letzter Tag",
+    "ru": "Последний день",
+    "ar": "آخر يوم"
+  },
+  "copyHistory.last1w": {
+    "de": "Letzte Woche",
+    "ru": "Последняя неделя",
+    "ar": "آخر أسبوع"
+  },
+  "copyHistory.last1m": {
+    "de": "Letzter Monat",
+    "ru": "Последний месяц",
+    "ar": "آخر شهر"
+  },
+  "copyHistory.last1y": {
+    "de": "Letztes Jahr",
+    "ru": "Последний год",
+    "ar": "آخر سنة"
+  },
+  "copyHistory.loadError": {
+    "de": "Trade-Historie konnte nicht geladen werden: {message}",
+    "ru": "Ошибка загрузки истории сделок: {message}",
+    "ar": "فشل تحميل سجل الصفقات: {message}"
+  },
+  "copyHistory.empty": {
+    "de": "Keine Trades",
+    "ru": "Нет сделок",
+    "ar": "لا صفقات"
+  },
+  "copyHistory.openPosition": {
+    "de": "Offen",
+    "ru": "Открыта",
+    "ar": "مفتوح"
+  },
+  "copyHistory.noRecords": {
+    "de": "Keine Einträge",
+    "ru": "Нет записей",
+    "ar": "لا سجلات"
+  },
+  "copyHistory.showing": {
+    "de": "Anzeige {from}-{to}{more}",
+    "ru": "Показано {from}-{to}{more}",
+    "ar": "عرض {from}-{to}{more}"
+  },
+  "copyHistory.exportSuccess": {
+    "de": "Exportiert",
+    "ru": "Экспортировано",
+    "ar": "تم التصدير"
+  },
+  "copyHistory.exportFailed": {
+    "de": "Export fehlgeschlagen: {message}",
+    "ru": "Ошибка экспорта: {message}",
+    "ar": "فشل التصدير: {message}"
+  },
+  "importPage.description": {
+    "de": "Wallet-Adresse eingeben, um Trades nachzufüllen und zur Beobachtungsliste hinzuzufügen.",
+    "ru": "Введите адрес кошелька для backfill сделок и добавления в watchlist.",
+    "ar": "أدخل عنوان المحفظة لملء الصفقات وإضافتها لقائمة المراقبة."
+  },
+  "importPage.platform": {
+    "de": "Plattform",
+    "ru": "Платформа",
+    "ar": "المنصة"
+  },
+  "importPage.submit": {
+    "de": "Importieren & Backfill",
+    "ru": "Импорт и backfill",
+    "ar": "استيراد وملء"
+  },
+  "importPage.selectPlatform": {
+    "de": "Plattform auswählen",
+    "ru": "Выберите платформу",
+    "ar": "اختر منصة"
+  },
+  "importPage.enterAddress": {
+    "de": "Wallet-Adresse eingeben",
+    "ru": "Введите адрес кошелька",
+    "ar": "أدخل عنوان المحفظة"
+  },
+  "importPage.invalidAddress": {
+    "de": "Ungültige Adresse — erwartet 0x + 40 Hex-Zeichen",
+    "ru": "Неверный адрес — ожидается 0x + 40 hex-символов",
+    "ar": "عنوان غير صالح — يُتوقع 0x + 40 حرف hex"
+  },
+  "importPage.importFailed": {
+    "de": "Import fehlgeschlagen",
+    "ru": "Ошибка импорта",
+    "ar": "فشل الاستيراد"
+  },
+  "importPage.success": {
+    "de": "Importiert — {count} Trades nachgefüllt",
+    "ru": "Импортировано — backfill {count} сделок",
+    "ar": "تم الاستيراد — ملء {count} صفقة"
+  },
+  "followForm.title": {
+    "de": "Follow bearbeiten",
+    "ru": "Редактировать follow",
+    "ar": "تعديل المتابعة"
+  },
+  "followForm.executeVenue": {
+    "de": "Ausführungs-Venue",
+    "ru": "Venue исполнения",
+    "ar": "Venue التنفيذ"
+  },
+  "followForm.sizingValue": {
+    "de": "sizing-Wert",
+    "ru": "Значение sizing",
+    "ar": "قيمة sizing"
+  },
+  "followForm.maxOrder": {
+    "de": "Max. Order notional (USDC, 0=unbegrenzt)",
+    "ru": "Макс. notional ордера (USDC, 0=без лимита)",
+    "ar": "الحد الأقصى notional للطلب (USDC، 0=غير محدود)"
+  },
+  "followForm.dailyMax": {
+    "de": "Tagesmaximum (USDC, 0=unbegrenzt)",
+    "ru": "Дневной максимум (USDC, 0=без лимита)",
+    "ar": "الحد اليومي (USDC، 0=غير محدود)"
+  },
+  "followForm.maxOpen": {
+    "de": "Max. offene Positionen (0=unbegrenzt)",
+    "ru": "Макс. открытых позиций (0=без лимита)",
+    "ar": "الحد الأقصى للمراكز المفتوحة (0=غير محدود)"
+  },
+  "followForm.channelTg": {
+    "de": "TG Deposit Wallet (Plattform signiert)",
+    "ru": "TG Deposit Wallet (платформа подписывает)",
+    "ar": "TG Deposit Wallet (المنصة توقّع)"
+  },
+  "followForm.sizingFixed": {
+    "de": "fixed · fester USDC-Betrag pro Trade",
+    "ru": "fixed · фиксированный USDC на сделку",
+    "ar": "fixed · USDC ثابت لكل صفقة"
+  },
+  "followForm.sizingProportional": {
+    "de": "proportional · vs. Leader-Größe",
+    "ru": "proportional · vs размер лидера",
+    "ar": "proportional · مقابل حجم القائد"
+  },
+  "followForm.sizingHint": {
+    "de": "fixed=USDC; proportional=Verhältnis (0.5=50%); percent_of_balance=% (0.05=5%)",
+    "ru": "fixed=USDC; proportional=коэффициент (0.5=50%); percent_of_balance=% (0.05=5%)",
+    "ar": "fixed=USDC؛ proportional=نسبة (0.5=50%)؛ percent_of_balance=% (0.05=5%)"
+  },
+  "followForm.sameVenueOnly": {
+    "de": " same_venue_only (nur gleiches Venue; aus = Cross-Venue braucht Pro+)",
+    "ru": " same_venue_only (только тот же Venue; выкл = cross-venue нужен Pro+)",
+    "ar": " same_venue_only (نفس Venue فقط؛ إيقاف = cross-venue يحتاج Pro+)"
+  },
+  "followForm.errorSizing": {
+    "de": "sizing-Wert muss > 0 sein",
+    "ru": "Значение sizing должно быть > 0",
+    "ar": "يجب أن تكون قيمة sizing > 0"
+  },
+  "upgradeForm.title": {
+    "de": "Zum Follow upgraden",
+    "ru": "Обновить до follow",
+    "ar": "ترقية للمتابعة"
+  },
+  "upgradeForm.targetDescription": {
+    "de": "Beobachtet: {target} · Upgrade startet Ausführung und verbraucht diesen Watch-Eintrag",
+    "ru": "Наблюдаю: {target} · обновление запускает исполнение и потребляет элемент watchlist",
+    "ar": "مراقَب: {target} · الترقية تبدأ التنفيذ وتستهلك عنصر المراقبة"
+  },
+  "upgradeForm.identityPrefix": {
+    "de": "Identität {id}…",
+    "ru": "Идентичность {id}…",
+    "ar": "الهوية {id}…"
+  },
+  "upgradeForm.advanced": {
+    "de": "Erweitertes Risiko (optional)",
+    "ru": "Расширенный риск (необязательно)",
+    "ar": "مخاطر متقدمة (اختياري)"
+  },
+  "upgradeForm.submit": {
+    "de": "Zum Follow upgraden",
+    "ru": "Обновить до follow",
+    "ar": "ترقية للمتابعة"
+  }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "sharpside-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "sqlx schema + 迁移 + 类型化查询封装（trader_hub / account 双 schema）"
+
+[dependencies]
+sharpside-shared.workspace = true
+sqlx.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

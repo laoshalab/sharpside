@@ -1,0 +1,38 @@
+---
+title: "影子模式"
+description: "第三方绩效 diff、metric_audit 与告警，用于运营可信度校验"
+category: "technical"
+section: "operations"
+order: 22
+icon: "eye"
+tags: ["shadow", "audit", "ops"]
+lastUpdated: "2026-07-22"
+difficulty: "advanced"
+---
+
+## 目的
+
+自建绩效与第三方数据可能偏差。影子模式定期对比，写入审计并触发告警阈值，避免运营「盲信」内部指标。
+
+## 链路（概念）
+
+```text
+第三方指标源
+    ↓ diff
+内部 trader_performance / tags
+    ↓
+metric_audit 记录
+    ↓
+超过阈值 → 告警 / admin 可见
+```
+
+## 运营侧
+
+- Admin 可配置影子阈值、标签规则、交易者可见性。
+- 审核映射与身份变更时，应结合影子 diff 判断是否异常。
+
+## 相关文档
+
+- 仓库 `docs/SHADOW_MODE.md`
+- `docs/THIRD_PARTY_DATA.md`
+- `docs/BOTFILTER_RULES.md`

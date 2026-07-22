@@ -1,0 +1,51 @@
+---
+title: "产品概述"
+description: "Sharpside — 多平台预测市场跟单平台：接得广、找得到、跟得上、运营得动"
+category: "guide"
+section: "overview"
+order: 1
+icon: "book-open"
+tags: ["overview", "product", "polymarket"]
+lastUpdated: "2026-07-22"
+---
+
+## 什么是 Sharpside
+
+**Sharpside** 是多平台预测市场跟单平台。核心做四件事：**接得广 / 找得到 / 跟得上 / 运营得动**。
+
+当前 Phase 1 以 Polymarket 为唯一 Venue，通道 B（自托管 daemon）闭环已落地；通道 A（TG Deposit Wallet 委托代签）与 admin / 影子模式 / 风控在 Phase 1b 补齐中。
+
+<MetricCard items={[
+  { value: "2", label: "执行通道" },
+  { value: "1+", label: "Venue（可扩展）" },
+  { value: "3", label: "风控覆盖层" },
+  { value: "MVP", label: "Phase 1a 已闭环" },
+]} />
+
+## 核心价值
+
+<CompareTable
+  before="常见跟单产品"
+  after="Sharpside"
+  rows={[
+    { dim: "资金托管", before: "把私钥交给平台", after: "通道 B 零钥本地签；通道 A 明确委托边界" },
+    { dim: "平台扩展", before: "单所硬编码", after: "Venue trait + Registry，一等公民扩展" },
+    { dim: "发现交易者", before: "手工筛地址", after: "排行榜 + 绩效标签 + 跨平台身份" },
+    { dim: "运营可控", before: "黑箱跟单", after: "影子模式 + admin 审核 + 熔断" },
+  ]}
+/>
+
+## 你能用它做什么
+
+1. **发现** — 浏览 Venue 排行榜与交易者绩效（ROI、胜率、回撤、标签）。
+2. **跟随** — 创建跟随关系，选择通道 A（TG）或通道 B（daemon）。
+3. **执行** — 信号经 copier 下发；dry_run 可先跑通闭环再接真金。
+4. **运营** — admin 审核映射/身份/热钥；影子模式对比第三方指标。
+
+## 诚实口径
+
+<Callout type="info" title="当前范围">
+  Phase 1a 为 Polymarket only + 通道 B daemon 闭环 + 最小 web。离线/无凭证环境默认 `COPIER_DRY_RUN=true` / `DAEMON_DRY_RUN=true`，用合成成交验证链路。
+</Callout>
+
+完整架构见 [系统架构](/docs/technical/architecture/overview)。

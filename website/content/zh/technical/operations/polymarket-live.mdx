@@ -1,0 +1,47 @@
+---
+title: "Polymarket 联调"
+description: "用真实或 mock Polymarket API 跑通 ingest → perf → 跟单 dry_run"
+category: "technical"
+section: "operations"
+order: 20
+icon: "database"
+tags: ["polymarket", "runbook", "mock"]
+lastUpdated: "2026-07-22"
+difficulty: "intermediate"
+---
+
+## 目标
+
+验证 venue-hub 调 Polymarket 公开 API（或本地 mock）完成：
+
+1. ingest leaderboard → `traders`
+2. markets → `raw_markets`
+3. import 地址回填 `raw_trades`
+4. perf worker → `trader_performance` / `trader_tag`
+5. 真实 trader 接入跟随 → copier dry_run 成交
+
+## Mock 与真网
+
+本机若无法直连 `*.polymarket.com`，使用：
+
+```bash
+python infra/mock/polymarket_mock.py
+```
+
+并通过环境变量注入：
+
+```bash
+export POLYMARKET_DATA_API_URL=...
+export POLYMARKET_GAMMA_API_URL=...
+export POLYMARKET_CLOB_API_URL=...
+```
+
+有网络后留空即走真实 API，**零代码改动**。
+
+## 注意点
+
+<Callout type="warning" title="NaN / Inf 指标">
+  无亏损时 `profit_factor` 可能为 Inf，无方差时 `sharpe` 可能为 NaN。入库前需归一化，否则 `Decimal` 转换失败会静默丢行。
+</Callout>
+
+完整步骤见仓库 `docs/RUNBOOK_POLYMARKET_LIVE.md`。

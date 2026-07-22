@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sharpside · 多平台预测市场跟单</title>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('sharpside-theme');
+    if (t === 'light') {
+      document.documentElement.classList.remove('dark');
+      document.documentElement.classList.add('light');
+    } else if (t === 'dark') {
+      document.documentElement.classList.remove('light');
+      document.documentElement.classList.add('dark');
+    } else if (window.matchMedia('(prefers-color-scheme: light)').matches) {
+      document.documentElement.classList.remove('dark');
+      document.documentElement.classList.add('light');
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="stylesheet" href="/styles/base.css?v=f33" />
+</head>
+<body>
+<div id="app"></div>
+<div class="toast-wrap" id="toast-wrap"></div>
+<script type="module" src="/main.js?v=f33"></script>
+</body>
+</html>

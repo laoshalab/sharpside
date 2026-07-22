@@ -1,0 +1,52 @@
+---
+title: "系统架构"
+description: "VenueHub、Gateway BFF、跟单执行与双通道在总体架构中的位置"
+category: "technical"
+section: "architecture"
+order: 10
+icon: "layers"
+tags: ["architecture", "venue-hub", "gateway"]
+lastUpdated: "2026-07-22"
+difficulty: "intermediate"
+---
+
+## 一句话
+
+Sharpside 是 **Venue 一等公民** 的跟单系统：数据采集与绩效在 `venue-hub`，用户与鉴权在 `account`，跟随关系在 `follow`，执行在 `copier` + 双通道，对外聚合经 `gateway` BFF。
+
+## 服务拓扑
+
+```text
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│  apps/web   │────▶│   gateway    │────▶│  account    │
+│  apps/admin │     │   (BFF)      │     │  follow     │
+│  apps/tg-bot│     └──────────────┘     │  copier     │
+└─────────────┘                          │  venue-hub  │
+                                         │  admin API  │
+                                         └─────────────┘
+                                                │
+                                         ┌──────▼──────┐
+                                         │  Postgres   │
+                                         └─────────────┘
+```
+
+## 关键模块职责
+
+| 模块 | 职责 |
+|------|------|
+| `crates/venues/*` | Venue trait、Polymarket adapter |
+| `services/venue-hub` | ingest、mapping、identity、perf、hot worker |
+| `services/account` | 用户、JWT、TG auth、订阅、凭证 |
+| `services/follow` | 跟随 CRUD |
+| `services/copier` | 信号消费、风控、执行/回传 |
+| `apps/daemon` | 通道 B 本机拉单与签名 |
+| `apps/tg-bot` | 通道 A 用户面 |
+| `apps/web` / `admin` | 用户端与运营台 |
+
+## 设计原则（摘录）
+
+1. **主路径不自建链上索引** — 尽量用 Venue 官方 / 第三方数据源。
+2. **Venue 可插拔** — 新平台实现 trait 并注册，不改跟单核心。
+3. **执行与发现分离** — 排行榜/绩效可独立演进；跟单链路可 dry_run。
+
+更细的存储与 Venue 设计见 [Venue 设计](/docs/technical/architecture/venues)。源码级说明见仓库 `docs/ARCHITECTURE.md`。

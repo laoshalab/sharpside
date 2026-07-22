@@ -1,0 +1,20 @@
+[package]
+name = "sharpside-tg-bot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TG bot · 通道 A（平台代签 session wallet）"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+teloxide = { version = "0.15.0", default-features = false, features = ["rustls", "ctrlc_handler", "macros"] }
