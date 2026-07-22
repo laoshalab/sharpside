@@ -77,48 +77,51 @@ sequenceDiagram
 
 ## 5. 信号派生 → 跟单指令（跨 Venue）
 
+> 实现口径：venue-hub hot worker 检出仓位 diff 后**同步 HTTP `POST {FOLLOW_URL}/internal/signals`**（携带 `X-Internal-Secret`）→ follow 派生 → 入 **Postgres `account.copy_order` 表队列**（非 Redis）。
+
 ```mermaid
 sequenceDiagram
-  participant VH as VenueHub
-  participant Q1 as Redis: trader.events
+  participant VH as VenueHub(hot worker)
   participant FLW as Follow
-  participant Q2 as Redis: copy_queue
+  participant DB as PostgreSQL(account.copy_order)
   VH->>VH: 检测某 (platform, address) 浮仓变化（快照 diff）
-  VH->>Q1: publish trader.position.changed{platform, address, market_id, ...}
-  FLW->>Q1: consume
+  VH->>FLW: POST /internal/signals {platform, trader_id, token_id, market_id, side, price, size, identity_id}
   FLW->>FLW: 匹配 active follow_relation（含 execute_venue）
   alt 跟随的是 identity
-    FLW->>FLW: 命中 identity 下任一 trader 的变化都触发
+    FLW->>FLW: 命中 identity 下任一 trader 的变化都触发（须 manual_verified）
   end
-  FLW->>Q2: enqueue copy_order{source_venue, source_market_id, execute_venue, ...}
+  FLW->>FLW: derive_copy_orders（sizing / same_venue_only / max_notional_per_order）
+  FLW->>DB: INSERT copy_order(status=pending|skipped, ...)
 ```
 
 ## 6. 通道 A 执行（TG Deposit Wallet 委托代签，跨 Venue）
 
 > 详见 `docs/CHANNEL_A_SIGNING.md` §3.2。FrenFlow 式：资产在 Polymarket Deposit Wallet（POLY_1271），平台持委托交易 owner EOA（KMS）代签。
+> 队列实现：copier worker 轮询 **Postgres `account.copy_order WHERE channel='tg' AND status='pending'`**（表队列，非 Redis）。
 
 ```mermaid
 sequenceDiagram
   participant CPY as Copier
-  participant Q as Redis: copy_queue
+  participant DB as PostgreSQL(account.copy_order)
   participant MAP as market_mappings
   participant ACC as Account
   participant KMS as KMS
   participant V as 目标 Venue (CLOB)
   participant TG as TG bot
-  CPY->>Q: consume (channel=tg)
-  CPY->>CPY: 风控引擎校验
+  CPY->>DB: SELECT pending copy_order(channel=tg) LIMIT batch
+  CPY->>CPY: 风控引擎校验（全局×档位×user overrides + per-follow）
   alt source_venue != execute_venue
     CPY->>MAP: 查 manual_verified + resolution_verified 映射
     MAP-->>CPY: execute_market_id
     CPY->>CPY: 单位换算（UsdcCtf ↔ UsdCents）
   end
+  CPY->>DB: UPDATE status=dispatched（占单防重）
   CPY->>ACC: 取 user_venue_credentials (kind=deposit_wallet_delegated)
   CPY->>KMS: 解密 encrypted_owner_key + encrypted_l2_secret
   KMS-->>CPY: owner EOA 私钥 + L2 secret
   CPY->>V: sign ERC-7739-wrapped POLY_1271 (signatureType=3, maker=signer=deposit wallet) + L2 HMAC + builderCode → POST /order
   V-->>CPY: 成交
-  CPY->>CPY: 写 copy_execution
+  CPY->>DB: INSERT copy_execution + UPDATE status=filled
   CPY->>TG: 推送成交通知给用户
 ```
 

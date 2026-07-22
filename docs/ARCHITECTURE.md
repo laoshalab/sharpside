@@ -105,7 +105,7 @@ flowchart TB
 - **按业务域聚合**：5 个服务覆盖"采集映射身份 / 跟随 / 执行 / 账户 / 网关"，不按技术层切。
 - **不过度拆微服务**：身份并入 VenueHub（紧耦合于交易者数据），避免 10+ 服务运维负担。
 - **共享走 crates**：venue trait / 映射 / 身份 / 绩效 / schema 下沉到 `crates/`。
-- **异步解耦靠 Redis 队列**：信号派生、跟单执行走队列，服务间无强同步依赖。
+- **异步解耦靠 Postgres 表队列**：信号派生经同步 HTTP `POST /internal/signals`，跟单指令入 `account.copy_order` 表由 copier 轮询消费（未引入 Redis/apalis）。
 - **全 Rust 主栈**：单二进制部署，serde 端到端类型共享（详见 TECH_STACK_RUST.md）。
 
 ## 5. 目录结构
@@ -178,7 +178,7 @@ sharpside/
 **职责**：把"跟谁、怎么跟、在哪执行"管起来。
 
 - **跟随关系 CRUD**：可跟随单 Venue 的 Trader，或跨 Venue 的 Identity；含 sizing + execute_venue 偏好。
-- **信号派生**：消费 VenueHub 发布的 `trader.position.changed`（带 platform）→ 匹配 relation → 生成 `copy_order`（含 source_venue + execute_venue + channel）→ 入 `copy_queue`。跟随 Identity 时强制校验 `identities.manual_verified=true`，否则跳过并告警。
+- **信号派生**：接收 VenueHub hot worker 的 `POST /internal/signals`（仓位 diff，带 `X-Internal-Secret`）→ 匹配 relation → `derive_copy_orders` 生成 `copy_order`（含 source_venue + execute_venue + channel）→ 入 `account.copy_order` 表（pending/skipped）。跟随 Identity 时强制校验 `identities.manual_verified=true`，否则跳过并告警。
 - **跟随画像**：用户视角的"我跟随了谁、跨平台收益如何"。
 
 **对外 API**：`POST /follows`、`GET /me/follows`、`PATCH /follows/{id}`、`DELETE /follows/{id}`。
@@ -194,7 +194,7 @@ sharpside/
 - **统一风控**：日成交上限、连续亏损熔断、rapid-flip 守卫、最小 notional、滑点保护（参数按通道/Venue/档位差异化）。
 
 **对外 API**：
-- 内部：消费 `copy_queue`、写 `copy_execution`。
+- 内部：轮询 `account.copy_order WHERE channel='tg' AND status='pending'`（Postgres 表队列）、写 `copy_execution`。
 - daemon：`GET /me/copy-orders?since=`、`POST /me/copy-orders/{id}/result`（daemon_api_key）。
 
 ### 6.4 Account · 用户 / Pro+ / 管辖域 / per-Venue 凭证
@@ -363,9 +363,8 @@ sequenceDiagram
   participant GW as Gateway
   participant ACC as Account
   participant VH as VenueHub
-  participant Q1 as Redis: trader.events
   participant FLW as Follow
-  participant Q2 as Redis: copy_queue
+  participant DB as PostgreSQL(account.copy_order)
   participant CPY as Copier
   participant MAP as market_mappings
   participant DMN as daemon(通道B)
@@ -376,11 +375,10 @@ sequenceDiagram
   GW->>VH: 校验 trader 存在（identity 须 manual_verified）
   GW->>FLW: 创建 follow_relation（含 channel=A|B）
   Note over VH: 检测 source_venue 浮仓变化
-  VH->>Q1: publish trader.position.changed(platform, trader, market)
-  FLW->>Q1: consume
+  VH->>FLW: POST /internal/signals(platform, trader, market, side, size, identity_id)
   FLW->>FLW: 匹配 relation（含 execute_venue + channel）
-  FLW->>Q2: enqueue copy_order(source_venue, source_market, execute_venue, channel)
-  CPY->>Q2: consume
+  FLW->>DB: INSERT copy_order(source_venue, source_market, execute_venue, channel, status=pending)
+  CPY->>DB: SELECT pending copy_order(channel=tg)
   CPY->>CPY: 风控 + 单位换算
   alt source_venue == execute_venue
     CPY->>CPY: market_id 直接透传
@@ -445,7 +443,7 @@ sequenceDiagram
 | TG bot | teloxide 0.13 |
 | daemon | tokio + reqwest + ratatui + alloy + rusqlite |
 | DB | PostgreSQL 16（按域分 schema） |
-| 缓存/队列 | Redis 7 + apalis |
+| 缓存/队列 | 跟单队列用 PostgreSQL 表队列（`account.copy_order`）；Redis/apalis 未引入 |
 | 监控 | tracing-otlp → Grafana + Sentry |
 
 **可选增强**：Python 分析服务（PyO3 暴露 `crates/perf`）/ 前端切 Next.js（保留 Rust 后端，协议走 OpenAPI）。

@@ -12,6 +12,10 @@ pub struct Config {
     /// venue-hub 地址（信号派生回查 identity verified 用，可选）
     #[allow(dead_code)]
     pub venue_hub_url: String,
+    /// 内部信号端点共享密钥（`/internal/signals` 鉴权）。
+    /// 非空时，请求须携带 `X-Internal-Secret: <secret>`，否则 401。
+    /// 空串则不校验（仅限内网/开发；生产应设置）。
+    pub internal_signal_secret: String,
 }
 
 impl Config {
@@ -28,6 +32,7 @@ impl Config {
             jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into()),
             venue_hub_url: env::var("VENUE_HUB_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8081".into()),
+            internal_signal_secret: env::var("INTERNAL_SIGNAL_SECRET").unwrap_or_default(),
         }
     }
 }

@@ -14,6 +14,7 @@ use crate::signal::{derive_copy_orders, SignalEvent};
 use crate::state::AppState;
 use crate::watchlist;
 use axum::extract::Path;
+use axum::http::HeaderMap;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -287,8 +288,22 @@ pub struct IngestResult {
 
 async fn ingest_signal(
     state: AppState,
+    headers: HeaderMap,
     Json(event): Json<SignalEvent>,
 ) -> Result<Json<IngestResult>, ApiError> {
+    // 0. 内部端点鉴权：若配置了 INTERNAL_SIGNAL_SECRET，请求须携带匹配的 X-Internal-Secret。
+    //    防止 follow 端口被误暴露公网时伪造仓位变化灌入 copy_order。
+    let secret = state.config.internal_signal_secret.trim();
+    if !secret.is_empty() {
+        let got = headers
+            .get("x-internal-secret")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if got != secret {
+            return Err(ApiError::Unauthorized("internal signal secret 不匹配".into()));
+        }
+    }
+
     // 1. 收集匹配的活跃跟随关系（trader 跟随 + identity 跟随）
     let mut relations: Vec<FollowRelation> =
         acct::list_follows_of_trader(&state.db, event.platform.as_str(), &event.trader_id).await?;

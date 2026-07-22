@@ -36,6 +36,9 @@ pub struct Config {
     /// Follow 服务基址（hot worker 检出仓位 diff 后 POST `/internal/signals`）。
     /// 默认 `http://127.0.0.1:8082`。设为空串则禁用信号 emit（仅快照）。
     pub follow_url: String,
+    /// 调用 follow `/internal/signals` 时携带的 `X-Internal-Secret`。
+    /// 须与 follow 服务的 `INTERNAL_SIGNAL_SECRET` 一致；空串则不发送（follow 侧也未配置时放行）。
+    pub follow_signal_secret: String,
 }
 
 /// 各 Venue 的启用开关。未启用的 Venue 不注册到 VenueRegistry，worker 跳过。
@@ -137,6 +140,7 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             follow_url: env::var("FOLLOW_URL").unwrap_or_else(|_| "http://127.0.0.1:8082".into()),
+            follow_signal_secret: env::var("FOLLOW_SIGNAL_SECRET").unwrap_or_default(),
         }
     }
 }

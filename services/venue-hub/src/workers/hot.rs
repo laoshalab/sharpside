@@ -200,10 +200,15 @@ async fn emit_signals(state: &AppState, signals: Vec<SignalPayload>) {
     }
     let url = format!("{}/internal/signals", follow_url.trim_end_matches('/'));
     let n = signals.len();
+    let secret = state.config.follow_signal_secret.trim();
     for sig in signals {
         let trader = sig.trader_id.clone();
         let token = sig.token_id.clone();
-        match state.http.post(&url).json(&sig).send().await {
+        let mut req = state.http.post(&url).json(&sig);
+        if !secret.is_empty() {
+            req = req.header("x-internal-secret", secret);
+        }
+        match req.send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if !status.is_success() {
