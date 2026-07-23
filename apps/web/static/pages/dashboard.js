@@ -91,7 +91,7 @@ export async function dashboardPage() {
     } else {
       followCard.appendChild(dataTable({
         columns: [
-          { key: 'follow_address', label: t('dashboard.colTarget'), render: r => r.follow_address ? r.follow_address.slice(0, 10) + '…' : t('dashboard.identityFallback') },
+          { key: 'follow_address', label: t('dashboard.colTarget'), render: r => r.follow_address ? escapeText(r.follow_address.slice(0, 10)) + '…' : t('dashboard.identityFallback') },
           { key: 'execute_venue', label: 'Venue' },
           { key: 'active', label: t('dashboard.colStatus'), render: r => r.active ? `<span class="pos">${t('dashboard.statusActive')}</span>` : `<span class="muted">${t('dashboard.statusPaused')}</span>` },
         ],

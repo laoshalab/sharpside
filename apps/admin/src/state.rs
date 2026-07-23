@@ -61,7 +61,10 @@ impl FromRequestParts<AppState> for AdminAuth {
         let token = header.strip_prefix("Bearer ").ok_or_else(|| {
             crate::error::ApiError::Unauthorized("expected Bearer".into()).into_response()
         })?;
-        if token.trim() != state.config.admin_token {
+        if !sharpside_shared::secrets::constant_time_eq(
+            token.trim().as_bytes(),
+            state.config.admin_token.as_bytes(),
+        ) {
             return Err(
                 crate::error::ApiError::Unauthorized("invalid admin token".into()).into_response(),
             );

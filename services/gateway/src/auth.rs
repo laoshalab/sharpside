@@ -27,14 +27,6 @@ pub struct AuthUser {
     pub user_id: String,
 }
 
-/// daemon 身份（daemon_api_key 模式）。作为 axum extractor 使用。
-#[derive(Debug, Clone)]
-pub struct DaemonAuth {
-    /// 预留：后续审计/日志按 key 归因
-    #[allow(dead_code)]
-    pub api_key: String,
-}
-
 /// 签发 JWT。由 account 服务调用（gateway 也提供以便测试）。
 pub fn issue_jwt(user_id: &str, secret: &str, ttl_seconds: i64) -> ApiResult<String> {
     let exp = (Utc::now() + Duration::seconds(ttl_seconds)).timestamp() as usize;
@@ -84,29 +76,6 @@ impl FromRequestParts<AppState> for AuthUser {
         let claims = verify_jwt(token, &state.config.jwt_secret)?;
         Ok(AuthUser {
             user_id: claims.sub,
-        })
-    }
-}
-
-#[async_trait]
-impl FromRequestParts<AppState> for DaemonAuth {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let key = parts
-            .headers
-            .get("X-Daemon-Api-Key")
-            .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| ApiError::Unauthorized("missing X-Daemon-Api-Key header".into()))?;
-
-        if key != state.config.daemon_api_key {
-            return Err(ApiError::Forbidden("invalid daemon api key".into()));
-        }
-        Ok(DaemonAuth {
-            api_key: key.into(),
         })
     }
 }

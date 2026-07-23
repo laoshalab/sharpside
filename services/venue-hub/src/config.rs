@@ -40,6 +40,9 @@ pub struct Config {
     /// **必须配置**：follow 侧已强制要求（空串即 401 拒收信号），故本侧空串会导致所有信号被拒。
     /// 须与 follow 服务的 `INTERNAL_SIGNAL_SECRET` 一致。
     pub follow_signal_secret: String,
+    /// 运维/admin 令牌：保护写端点（如 `/traders/import*`）免遭未鉴权滥用。
+    /// 请求须带 `Authorization: Bearer <token>`。生产由 `assert_secret` 强制非空/非默认值。
+    pub admin_token: String,
 }
 
 /// 各 Venue 的启用开关。未启用的 Venue 不注册到 VenueRegistry，worker 跳过。
@@ -147,6 +150,12 @@ impl Config {
             follow_signal_secret: sharpside_shared::secrets::assert_secret(
                 "FOLLOW_SIGNAL_SECRET",
                 &env::var("FOLLOW_SIGNAL_SECRET").unwrap_or_default(),
+            )
+            .to_string(),
+            admin_token: sharpside_shared::secrets::assert_secret(
+                "VENUE_HUB_ADMIN_TOKEN",
+                &env::var("VENUE_HUB_ADMIN_TOKEN")
+                    .unwrap_or_else(|_| "dev-admin-token".into()),
             )
             .to_string(),
         }

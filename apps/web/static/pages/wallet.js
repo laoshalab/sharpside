@@ -185,7 +185,7 @@ export async function walletPage() {
       histCard.appendChild(dataTable({
         columns: [
           { key: 'created_at', label: t('wallet.colTime'), render: r => r.created_at ? new Date(r.created_at).toLocaleString() : '—' },
-          { key: 'to_address', label: t('wallet.colToAddress'), render: r => r.to_address ? r.to_address.slice(0, 10) + '…' + r.to_address.slice(-4) : '—' },
+          { key: 'to_address', label: t('wallet.colToAddress'), render: r => r.to_address ? `${escapeText(r.to_address.slice(0, 10))}…${escapeText(r.to_address.slice(-4))}` : '—' },
           { key: 'amount', label: t('wallet.colAmount'), render: r => fmtUSD(Number(r.amount)) },
           { key: 'status', label: t('wallet.colStatus'), render: r => {
               const s = r.status || '—';
@@ -194,7 +194,7 @@ export async function walletPage() {
               return `<span class="${cls}">${icon} ${s}</span>`;
             }
           },
-          { key: 'tx_hash', label: t('wallet.colTxHash'), render: r => r.tx_hash ? `<span title="${r.tx_hash}">${r.tx_hash.slice(0, 10)}…</span>` : '—' },
+          { key: 'tx_hash', label: t('wallet.colTxHash'), render: r => r.tx_hash ? `<span title="${escapeAttr(r.tx_hash)}">${escapeText(r.tx_hash.slice(0, 10))}…</span>` : '—' },
           { key: 'note', label: t('wallet.colNote'), render: r => r.note ? `<span class="neg" title="${escapeAttr(r.note)}">${escapeText(r.note).slice(0, 30)}${r.note.length > 30 ? '…' : ''}</span>` : '—' },
         ],
         rows,
@@ -280,7 +280,7 @@ export async function walletPage() {
       redeemHistCard.appendChild(dataTable({
         columns: [
           { key: 'created_at', label: t('wallet.colTime'), render: r => r.created_at ? new Date(r.created_at).toLocaleString() : '—' },
-          { key: 'condition_id', label: t('wallet.colMarket'), render: r => r.condition_id ? `<span title="${escapeAttr(r.condition_id)}">${r.condition_id.slice(0, 10)}…</span>` : '—' },
+          { key: 'condition_id', label: t('wallet.colMarket'), render: r => r.condition_id ? `<span title="${escapeAttr(r.condition_id)}">${escapeText(r.condition_id.slice(0, 10))}…</span>` : '—' },
           { key: 'outcome', label: t('wallet.colOutcome'), render: r => `<span class="pos">${escapeText(r.outcome)}</span>` },
           { key: 'amount', label: t('wallet.colSize'), render: r => fmtUSD(Number(r.amount)) },
           { key: 'source', label: t('wallet.colSource'), render: r => r.source === 'auto' ? `<span class="muted">${t('wallet.sourceAuto')}</span>` : t('wallet.sourceManual') },
@@ -291,7 +291,7 @@ export async function walletPage() {
               return `<span class="${cls}">${icon} ${s}</span>`;
             }
           },
-          { key: 'tx_hash', label: t('wallet.colTxHash'), render: r => r.tx_hash ? `<span title="${r.tx_hash}">${r.tx_hash.slice(0, 10)}…</span>` : '—' },
+          { key: 'tx_hash', label: t('wallet.colTxHash'), render: r => r.tx_hash ? `<span title="${escapeAttr(r.tx_hash)}">${escapeText(r.tx_hash.slice(0, 10))}…</span>` : '—' },
           { key: 'note', label: t('wallet.colNote'), render: r => r.note ? `<span class="neg" title="${escapeAttr(r.note)}">${escapeText(r.note).slice(0, 30)}${r.note.length > 30 ? '…' : ''}</span>` : '—' },
         ],
         rows,

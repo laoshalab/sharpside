@@ -77,7 +77,14 @@ export function dataTable({ columns, rows = [], onRowClick, className }) {
     const tr = el('tr', onRowClick ? { class: 'clickable', onclick: () => onRowClick(row) } : {});
     for (const c of columns) {
       const val = c.render ? c.render(row) : row[c.key];
-      tr.appendChild(el('td', { html: val == null ? '<span class="neutral">—</span>' : String(val), ...(c.class ? { class: c.class } : {}) }));
+      // XSS 防护：无 render 的列是原始 API 字段（别名/地址/标题等），用 textContent 而非
+      // innerHTML，避免 API 数据中的 HTML 元字符被解析。有 render 的列由 render 自行转义
+      // （代码库约定：返回 HTML 片段时用 escapeHtml/escapeText/escapeAttr 处理 API 数据）。
+      if (c.render) {
+        tr.appendChild(el('td', { html: val == null ? '<span class="neutral">—</span>' : String(val), ...(c.class ? { class: c.class } : {}) }));
+      } else {
+        tr.appendChild(el('td', { text: val == null ? '—' : String(val), ...(c.class ? { class: c.class } : {}) }));
+      }
     }
     tbody.appendChild(tr);
   }

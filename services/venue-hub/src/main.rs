@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!(listen = %config.listen_addr, "venue-hub HTTP 监听");
 
-    let serve = axum::serve(listener, app);
+    let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
     // 任一退出（serve 完成 / 所有 worker 结束 / 信号）即收尾
     tokio::select! {
@@ -65,12 +65,37 @@ async fn main() -> anyhow::Result<()> {
                 tracing::error!(error = %e, "HTTP serve 退出");
             }
         }
-        _ = async move {
+        _ = async {
             while workers.join_next().await.is_some() {}
         } => {
             tracing::error!("所有 worker 已退出");
         }
     }
 
+    // 收尾：中止残留 worker 并等待退出（信号触发 graceful shutdown 后，HTTP 已排空）
+    workers.abort_all();
+    while workers.join_next().await.is_some() {}
+    tracing::info!("venue-hub 已关停");
     Ok(())
+}
+
+/// 优雅关停信号：监听 Ctrl-C / SIGTERM，触发后 axum 停止接收新连接并排空在途请求。
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.expect("install ctrl_c handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("收到终止信号，开始优雅关停（排空在途请求 + 中止 worker）");
 }

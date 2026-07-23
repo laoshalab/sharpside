@@ -24,12 +24,35 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(listen = %config.listen_addr, "sharpside-gateway starting");
 
     let state = AppState::new(config.clone());
-    let limiters = RateLimiters::new(config.rate_limit.default_rps, config.rate_limit.daemon_rps);
+    let limiters = RateLimiters::new(config.rate_limit.default_rps);
     let app = routes::router(state, limiters);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("listening on {}", config.listen_addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+/// 优雅关停信号：监听 Ctrl-C / SIGTERM，触发后 axum 停止接收新连接并排空在途请求。
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.expect("install ctrl_c handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("收到终止信号，开始优雅关停（排空在途请求）");
 }

@@ -23,6 +23,8 @@ URL="http://127.0.0.1:8081"
 FILE=""
 MODE="batch"   # batch | single
 BATCH_MAX=100
+# venue-hub 写端点需 admin token：从环境变量 VENUE_HUB_ADMIN_TOKEN 读取（与 venue-hub 服务一致）。
+ADMIN_TOKEN="${VENUE_HUB_ADMIN_TOKEN:-}"
 
 usage() {
   sed -n '2,/^set /p' "$0" | sed 's/^# \{0,1\}//'
@@ -45,6 +47,11 @@ if [ -z "$FILE" ]; then echo "错误：请用 -f 指定地址文件" >&2; usage;
 if [ ! -f "$FILE" ]; then echo "错误：文件不存在: $FILE" >&2; exit 1; fi
 command -v curl >/dev/null || { echo "错误：需要 curl" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "错误：需要 python3" >&2; exit 1; }
+if [ -z "$ADMIN_TOKEN" ]; then
+  echo "错误：请设环境变量 VENUE_HUB_ADMIN_TOKEN（venue-hub 写端点需 admin 鉴权）" >&2
+  exit 1
+fi
+AUTH_HDR="Authorization: Bearer $ADMIN_TOKEN"
 
 # 解析地址文件 → JSON 数组（统一注入 platform）。输出到 stdout。
 parse_items() {
@@ -80,7 +87,7 @@ if [ "$MODE" = "single" ]; then
 for x in json.load(sys.stdin): print(json.dumps(x))' <<<"$ITEMS" | while IFS= read -r line; do
     addr=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["address"])' <<<"$line")
     printf '  导入 %s ... ' "$addr"
-    resp=$(curl -sS -X POST "$URL/traders/import" -H 'Content-Type: application/json' -d "$line" 2>&1)
+    resp=$(curl -sS -X POST "$URL/traders/import" -H 'Content-Type: application/json' -H "$AUTH_HDR" -d "$line" 2>&1)
     n=$(python3 -c 'import json,sys
 try: print(json.load(sys.stdin)["trades_backfilled"])
 except: print("")' <<<"$resp" 2>/dev/null)
@@ -108,7 +115,7 @@ while IFS= read -r batch_items; do
   bi=$((bi+1))
   printf '=== 第 %d/%d 批 ===\n' "$bi" "$NB"
   body=$(python3 -c 'import json,sys;print(json.dumps({"items":json.loads(sys.argv[1])}))' "$batch_items")
-  resp=$(curl -sS -X POST "$URL/traders/import/batch" -H 'Content-Type: application/json' -d "$body" 2>&1)
+  resp=$(curl -sS -X POST "$URL/traders/import/batch" -H 'Content-Type: application/json' -H "$AUTH_HDR" -d "$body" 2>&1)
   rc=$?
   if [ $rc -ne 0 ]; then
     echo "  ❌ 批次请求失败: $resp" >&2

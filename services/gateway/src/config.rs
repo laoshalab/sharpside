@@ -14,8 +14,6 @@ pub struct Config {
     pub jwt_secret: String,
     /// JWT 过期秒数
     pub jwt_ttl_seconds: i64,
-    /// daemon_api_key 校验密钥（MVP：单密钥；生产由 account 服务签发）
-    pub daemon_api_key: String,
     /// 上游服务 URL
     pub upstreams: Upstreams,
     /// 限流配置
@@ -40,8 +38,6 @@ pub struct Upstreams {
 pub struct RateLimitConfig {
     /// 默认组：每秒每 IP 请求数
     pub default_rps: u32,
-    /// daemon 长轮询组：每秒每 daemon_api_key 请求数（更宽松）
-    pub daemon_rps: u32,
 }
 
 impl Config {
@@ -58,11 +54,6 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(86_400),
-            daemon_api_key: sharpside_shared::secrets::assert_secret(
-                "DAEMON_API_KEY",
-                &env::var("DAEMON_API_KEY").unwrap_or_else(|_| "dev-daemon-key-change-me".into()),
-            )
-            .to_string(),
             upstreams: Upstreams {
                 venue_hub: env::var("VENUE_HUB_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:8081".into()),
@@ -75,10 +66,6 @@ impl Config {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(20),
-                daemon_rps: env::var("RATE_LIMIT_DAEMON_RPS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(5),
             },
             // 生产环境（APP_ENV=production）强制关闭 dev 端点，忽略 DEV_ENDPOINTS_ENABLED。
             // 启用条件：debug 构建 且 非生产；或显式 DEV_ENDPOINTS_ENABLED=1 且 非生产。

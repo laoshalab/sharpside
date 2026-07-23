@@ -324,7 +324,7 @@ async fn ingest_signal(
         .get("x-internal-secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if got != secret {
+    if !sharpside_shared::secrets::constant_time_eq(got.as_bytes(), secret.as_bytes()) {
         return Err(ApiError::Unauthorized("internal signal secret 不匹配".into()));
     }
 

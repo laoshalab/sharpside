@@ -232,7 +232,7 @@ export async function traderPage({ params }) {
       tradesCard.appendChild(dataTable({
         columns: [
           { key: 'ts', label: t('trader.colTime'), render: r => fmtDateTime(r.ts) },
-          { key: 'side', label: t('trader.colSide'), render: r => `<span class="${r.side === 'BUY' ? 'pos' : 'neg'}">${r.side || '—'}</span>` },
+          { key: 'side', label: t('trader.colSide'), render: r => `<span class="${r.side === 'BUY' ? 'pos' : 'neg'}">${escapeHtml(r.side || '—')}</span>` },
           { key: 'size', label: t('trader.colQty'), render: r => fmtNum(r.size, 2) },
           { key: 'price', label: t('trader.colPrice'), render: r => fmtNum(r.price, 4) },
           { key: 'token_id', label: 'Token', render: r => `<code>${escapeHtml(String(r.token_id || '').slice(0, 12))}…</code>` },

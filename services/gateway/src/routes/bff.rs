@@ -2,8 +2,8 @@
 //!
 //! 上游不可达时该字段返回空结构 / 默认值，不阻塞整体 BFF（降级）。
 
-use crate::auth::{AuthUser, DaemonAuth};
-use crate::error::{ApiError, ApiResult};
+use crate::auth::AuthUser;
+use crate::error::ApiResult;
 use crate::state::AppState;
 use axum::http::HeaderMap;
 use axum::Json;
@@ -148,29 +148,6 @@ fn approx_pnl_from_execs(execs: &serde_json::Value) -> f64 {
                 .sum::<f64>()
         })
         .unwrap_or(0.0)
-}
-
-/// daemon 长轮询：`GET /me/copy-orders?since=`。对应 `docs/FLOWS.md` §7。
-pub async fn copy_orders(
-    state: AppState,
-    _daemon: DaemonAuth,
-    axum::extract::Query(q): axum::extract::Query<SinceQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let url = format!(
-        "{}/copy-orders?since={}",
-        state.config.upstreams.copier, q.since
-    );
-    let resp = state.http.get(&url).send().await?;
-    if !resp.status().is_success() {
-        return Err(ApiError::Upstream(format!("copier {}", resp.status())));
-    }
-    let body: serde_json::Value = resp.json().await?;
-    Ok(Json(body))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SinceQuery {
-    pub since: String,
 }
 
 /// 拉取上游，失败返回空 Value（降级，不阻塞整体 BFF）。

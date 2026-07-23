@@ -281,6 +281,7 @@ pub struct ImportResponse {
 /// 绩效由 perf worker 异步重算（不在此同步阻塞）。
 pub async fn import_trader(
     state: AppState,
+    _auth: crate::state::AdminAuth,
     Json(body): Json<ImportBody>,
 ) -> Result<Json<ImportResponse>, ApiError> {
     let platform = body.platform.clone();
@@ -359,6 +360,7 @@ pub struct BatchImportResponse {
 /// 单条失败不影响其余条目（per-item error 收集）。对应 `docs/FLOWS.md` §1。
 pub async fn import_traders_batch(
     state: AppState,
+    _auth: crate::state::AdminAuth,
     Json(body): Json<BatchImportBody>,
 ) -> Result<Json<BatchImportResponse>, ApiError> {
     if body.items.is_empty() {

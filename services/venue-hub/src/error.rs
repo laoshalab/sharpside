@@ -15,6 +15,10 @@ pub enum ApiError {
     NotFound(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("venue unsupported: {0}")]
     Unsupported(String),
     #[error("db: {0}")]
@@ -30,6 +34,8 @@ impl ApiError {
         match self {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Db(_) | ApiError::Venue(_) | ApiError::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -46,6 +52,8 @@ impl IntoResponse for ApiError {
             "kind": match &self {
                 ApiError::NotFound(_) => "not_found",
                 ApiError::BadRequest(_) => "bad_request",
+                ApiError::Unauthorized(_) => "unauthorized",
+                ApiError::Forbidden(_) => "forbidden",
                 ApiError::Unsupported(_) => "unsupported",
                 ApiError::Db(_) => "db",
                 ApiError::Venue(_) => "venue",

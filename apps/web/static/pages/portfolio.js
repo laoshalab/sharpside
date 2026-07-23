@@ -124,7 +124,7 @@ export async function portfolioPage() {
           columns: [
             { key: 'executed_at', label: t('portfolio.colTime'), render: r => new Date(r.executed_at).toLocaleString() },
             { key: 'venue', label: 'Venue' },
-            { key: 'side', label: t('portfolio.colSide'), render: r => `<span class="${r.side === 'BUY' ? 'pos' : 'neg'}">${r.side}</span>` },
+            { key: 'side', label: t('portfolio.colSide'), render: r => `<span class="${r.side === 'BUY' ? 'pos' : 'neg'}">${escapeText(r.side)}</span>` },
             { key: 'filled_size', label: t('portfolio.colSize'), render: r => fmtNum(r.filled_size, 2) },
             { key: 'filled_price', label: t('portfolio.colPrice'), render: r => fmtNum(r.filled_price, 4) },
             { key: 'fee', label: t('portfolio.colFee'), render: r => fmtUSD(r.fee, 4) },

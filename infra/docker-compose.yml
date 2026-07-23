@@ -108,6 +108,10 @@ services:
     environment:
       VENUE_HUB_LISTEN_ADDR: "0.0.0.0:8081"
       DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
+      # 写端点 admin 鉴权（import_addresses.sh 须带同值）。dev 用默认值；生产经 env_file 注入强 token。
+      VENUE_HUB_ADMIN_TOKEN: "${VENUE_HUB_ADMIN_TOKEN:-dev-admin-token}"
+      # 须与 follow 的 INTERNAL_SIGNAL_SECRET 一致，否则信号被 follow 拒收。
+      FOLLOW_SIGNAL_SECRET: "${FOLLOW_SIGNAL_SECRET:-e2e-internal-secret}"
     ports:
       - "8081:8081"
     depends_on:
@@ -138,6 +142,8 @@ services:
       FOLLOW_LISTEN_ADDR: "0.0.0.0:8082"
       DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
       VENUE_HUB_URL: "http://venue-hub:8081"
+      # 须与 venue-hub 的 FOLLOW_SIGNAL_SECRET 一致。空串则拒收所有信号。
+      INTERNAL_SIGNAL_SECRET: "${INTERNAL_SIGNAL_SECRET:-e2e-internal-secret}"
     ports:
       - "8082:8082"
     depends_on:

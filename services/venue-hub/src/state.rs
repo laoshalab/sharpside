@@ -48,3 +48,42 @@ impl FromRequestParts<AppState> for AppState {
         Ok(state.clone())
     }
 }
+
+/// 运维/admin 鉴权：`Authorization: Bearer <admin_token>`。保护写端点（如 `/traders/import*`）。
+///
+/// 常时比较，避免按字节短路带来的时序侧信道。
+#[derive(Debug, Clone)]
+pub struct AdminAuth {
+    #[allow(dead_code)]
+    pub token: String,
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for AdminAuth {
+    type Rejection = crate::error::ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .ok_or_else(|| {
+                crate::error::ApiError::Unauthorized("missing Authorization header".into())
+            })?;
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| crate::error::ApiError::Unauthorized("expected Bearer scheme".into()))?;
+        if !sharpside_shared::secrets::constant_time_eq(
+            token.trim().as_bytes(),
+            state.config.admin_token.as_bytes(),
+        ) {
+            return Err(crate::error::ApiError::Forbidden("invalid admin token".into()));
+        }
+        Ok(AdminAuth {
+            token: token.trim().to_string(),
+        })
+    }
+}

@@ -122,4 +122,14 @@ mod tests {
         assert!(!is_production());
         std::env::remove_var("APP_ENV");
     }
+
+    #[test]
+    fn constant_time_eq_matches_and_rejects() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
 }

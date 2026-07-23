@@ -122,7 +122,10 @@ async fn tg_login(
         .get("X-TG-Bot-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if provided != state.config.tg_bot_secret {
+    if !sharpside_shared::secrets::constant_time_eq(
+        provided.as_bytes(),
+        state.config.tg_bot_secret.as_bytes(),
+    ) {
         return Err(ApiError::Unauthorized("invalid tg-bot secret".into()));
     }
     let user = acct::upsert_tg_user(&state.db, body.tg_id).await?;
@@ -147,6 +150,14 @@ async fn update_subscription(
 ) -> Result<Json<sharpside_db::User>, ApiError> {
     if !matches!(body.tier.as_str(), "free" | "pro_plus") {
         return Err(ApiError::BadRequest("tier 必须为 free / pro_plus".into()));
+    }
+    // 安全：pro_plus 升级必须经支付/billing webhook，禁止自助升档（否则任意登录用户
+    // 可白嫖 Pro+ 权益）。free（取消订阅）任何用户可自助。生产环境直接拒绝 pro_plus
+    // 升级；dev/测试环境保留 F0「测试开通」能力（APP_ENV != production）。
+    if body.tier == "pro_plus" && sharpside_shared::secrets::is_production() {
+        return Err(ApiError::Forbidden(
+            "pro_plus 升级需通过支付回调，禁止自助升档".into(),
+        ));
     }
     let user = acct::update_subscription(&state.db, auth.user_id, &body.tier, body.until).await?;
     Ok(Json(user))

@@ -90,6 +90,7 @@ mod tests {
             polymarket_clob_api: None,
             follow_url: String::new(),
             follow_signal_secret: String::new(),
+            admin_token: String::new(),
         };
         let registry = build_registry(&config);
         assert!(registry
