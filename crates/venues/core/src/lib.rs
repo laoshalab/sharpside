@@ -14,8 +14,8 @@ pub mod types;
 pub use sharpside_shared::{Platform, Side};
 pub use types::{
     AuthModel, Balance, Credential, Fill, Geo, LeaderboardQuery, Market, MarketQuery, Order,
-    OrderBook, OrderBookLevel, OrderStatus, Pagination, Position, RedeemResult, Trade, Trader,
-    Unit, VenueCapabilities, VenueInfo, WithdrawResult,
+    OrderBook, OrderBookLevel, OrderState, OrderStatus, Pagination, Position, RedeemResult,
+    Trade, Trader, Unit, VenueCapabilities, VenueInfo, WithdrawResult,
 };
 
 use async_trait::async_trait;
@@ -88,6 +88,12 @@ pub trait Venue: Send + Sync {
     /// 订单状态查询（部分成交/撤单/拒绝）。
     async fn order_status(&self, _cred: &Credential, _id: &str) -> Result<OrderStatus, VenueError> {
         Err(VenueError::Unsupported("order_status"))
+    }
+
+    /// 订单成交状态对账（含已成交股数/均价）。reconcile worker 调此回写真实成交，
+    /// 替代"提交即记全成"的账面假设。默认 Unsupported，已实现成交对账的 Venue override。
+    async fn order_state(&self, _cred: &Credential, _id: &str) -> Result<OrderState, VenueError> {
+        Err(VenueError::Unsupported("order_state"))
     }
 
     /// 余额/仓位对账（跟单前后核对，防漏单/重复成交）。

@@ -13,6 +13,7 @@ mod config;
 mod error;
 mod exec;
 mod reclaim_worker;
+mod reconcile_worker;
 mod redeem_worker;
 mod risk;
 mod routes;
@@ -117,6 +118,18 @@ async fn main() -> anyhow::Result<()> {
         interval_secs = config.worker_reclaim_secs,
         timeout_secs = config.dispatched_timeout_secs,
         "worker 已启动：reclaim(dispatched 超时回收)"
+    );
+
+    // 成交对账 worker（扫 submitted → 查 Venue 真实成交回写，替代"提交即记全成"）
+    let reconcile_state = state.clone();
+    workers.spawn(async move {
+        reconcile_worker::run(reconcile_state).await;
+    });
+    tracing::info!(
+        enabled = config.reconcile_worker_enabled,
+        interval_secs = config.worker_reconcile_secs,
+        timeout_secs = config.reconcile_timeout_secs,
+        "worker 已启动：reconcile(成交对账)"
     );
 
     // HTTP API（daemon 通道 B 端点）

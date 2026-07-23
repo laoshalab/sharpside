@@ -388,6 +388,125 @@ impl Venue for PolymarketVenue {
         }
     }
 
+    /// 成交对账：调 CLOB `/data/order/{id}`（L2 HMAC）查订单真实状态与已成交股数。
+    /// Polymarket order 响应：`status`（LIVE/MATCHED/CANCELLED）、`size_matched`（已成交股数）、
+    /// `price`（限价）。MATCHED → Filled；LIVE 且 size_matched>0 → PartiallyFilled，否则 Open；
+    /// CANCELLED/EXPIRED → Cancelled。filled_price 取响应 price（无独立均价字段，限价近似）。
+    async fn order_state(
+        &self,
+        cred: &Credential,
+        order_id: &str,
+    ) -> Result<sharpside_venues_core::OrderState, VenueError> {
+        let Credential::DepositWalletDelegated {
+            owner_address,
+            encrypted_owner_key,
+            l2_api_key,
+            encrypted_l2_secret,
+            l2_passphrase,
+            ..
+        } = cred
+        else {
+            return Err(VenueError::Auth(
+                "order_state 仅支持 DepositWalletDelegated 凭证".into(),
+            ));
+        };
+        let signer = self
+            .resolve_owner_signer(encrypted_owner_key)
+            .map_err(VenueError::Auth)?;
+        if signer.address().to_string().to_lowercase() != owner_address.to_lowercase() {
+            return Err(VenueError::Auth(
+                "order_state: owner_address 与解出的 owner EOA 不一致".into(),
+            ));
+        }
+        let l2_secret = self
+            .resolve_l2_secret(encrypted_l2_secret)
+            .map_err(VenueError::Auth)?;
+        let v = self
+            .client
+            .get_order_l2(
+                order_id,
+                l2_api_key,
+                &l2_secret,
+                l2_passphrase,
+                signer.address(),
+            )
+            .await
+            .map_err(VenueError::Auth)?;
+        let status_str = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        // size_matched：Polymarket 返回字符串或数字，兼容两种。
+        let f64_of = |key: &str| -> f64 {
+            v.get(key)
+                .and_then(|x| x.as_str().and_then(|s| s.parse::<f64>().ok()))
+                .or_else(|| v.get(key).and_then(|x| x.as_f64()))
+                .unwrap_or(0.0)
+        };
+        let size_matched = f64_of("size_matched");
+        let price = f64_of("price");
+        let status = match status_str.as_str() {
+            "MATCHED" => sharpside_venues_core::OrderStatus::Filled,
+            "LIVE" if size_matched > 0.0 => {
+                sharpside_venues_core::OrderStatus::PartiallyFilled
+            }
+            "LIVE" => sharpside_venues_core::OrderStatus::Open,
+            "CANCELLED" | "EXPIRED" => sharpside_venues_core::OrderStatus::Cancelled,
+            _ => sharpside_venues_core::OrderStatus::Open,
+        };
+        Ok(sharpside_venues_core::OrderState {
+            status,
+            filled_size: size_matched,
+            filled_price: price,
+            fee: 0.0,
+        })
+    }
+
+    /// 撤单：调 CLOB `DELETE /order`（L2 HMAC）。reconcile worker 对超时未成交的 submitted 单撤单，
+    /// 避免挂单长期占用资金 / 产生非预期成交。
+    async fn cancel_order(
+        &self,
+        cred: &Credential,
+        order_id: &str,
+    ) -> Result<(), VenueError> {
+        let Credential::DepositWalletDelegated {
+            owner_address,
+            encrypted_owner_key,
+            l2_api_key,
+            encrypted_l2_secret,
+            l2_passphrase,
+            ..
+        } = cred
+        else {
+            return Err(VenueError::Auth(
+                "cancel_order 仅支持 DepositWalletDelegated 凭证".into(),
+            ));
+        };
+        let signer = self
+            .resolve_owner_signer(encrypted_owner_key)
+            .map_err(VenueError::Auth)?;
+        if signer.address().to_string().to_lowercase() != owner_address.to_lowercase() {
+            return Err(VenueError::Auth(
+                "cancel_order: owner_address 与解出的 owner EOA 不一致".into(),
+            ));
+        }
+        let l2_secret = self
+            .resolve_l2_secret(encrypted_l2_secret)
+            .map_err(VenueError::Auth)?;
+        self.client
+            .cancel_order_l2(
+                order_id,
+                l2_api_key,
+                &l2_secret,
+                l2_passphrase,
+                signer.address(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(VenueError::Auth)
+    }
+
     /// 链上余额兜底（无需 CLOB 凭证）：Polygon JSON-RPC `eth_call` 读 pUSD `balanceOf(deposit_wallet)`。
     ///
     /// 用于离线预配（`provision_live=false`）时展示 Deposit Wallet 的 pUSD 持有量——

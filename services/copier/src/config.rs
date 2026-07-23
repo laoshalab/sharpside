@@ -37,6 +37,13 @@ pub struct Config {
     pub dispatched_timeout_secs: u64,
     /// dispatched 回收 worker 是否启用。默认 true（安全网，仅置 failed 不重下）。
     pub reclaim_worker_enabled: bool,
+    /// 成交对账 worker 轮询间隔（秒）。扫 submitted 指令查 Venue 真实成交回写。
+    pub worker_reconcile_secs: u64,
+    /// submitted 超时阈值（秒）：submitted_at 早于 now()-此值且仍 LIVE 的订单撤单置 cancelled。
+    /// 取足够长覆盖限价单正常成交窗口；过短会过早撤掉尚未成交的挂单。
+    pub reconcile_timeout_secs: u64,
+    /// 成交对账 worker 是否启用。默认 true（Channel A 真钱路径必需，否则 submitted 单永久卡死）。
+    pub reconcile_worker_enabled: bool,
     /// JWT 签名密钥（与 account/gateway 共用，校验用户态端点的 Bearer token）。
     pub jwt_secret: String,
 }
@@ -107,6 +114,15 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(600),
             reclaim_worker_enabled: parse_bool("RECLAIM_WORKER_ENABLED", true),
+            worker_reconcile_secs: env::var("WORKER_RECONCILE_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(15),
+            reconcile_timeout_secs: env::var("RECONCILE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120),
+            reconcile_worker_enabled: parse_bool("RECONCILE_WORKER_ENABLED", true),
             jwt_secret: sharpside_shared::secrets::assert_secret(
                 "JWT_SECRET",
                 &env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into()),

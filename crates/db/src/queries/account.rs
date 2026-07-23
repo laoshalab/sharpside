@@ -473,6 +473,51 @@ pub async fn claim_copy_order(
     Ok(row)
 }
 
+/// place_order 成功后置 `submitted`：持久化 Venue 返回的订单 ID + 提交时刻。
+/// 由 reconcile worker 据此轮询 `Venue::order_state` 回写真实成交。
+/// 用 `WHERE id=$1 AND status='dispatched'` CAS，避免与 reclaim worker 抢占冲突。
+pub async fn mark_copy_order_submitted(
+    pool: &PgPool,
+    id: Uuid,
+    venue_order_id: &str,
+) -> Result<Option<CopyOrderRow>, DbError> {
+    let row = sqlx::query_as::<_, CopyOrderRow>(
+        r#"
+        UPDATE account.copy_order SET
+            status         = 'submitted',
+            submitted_at   = now(),
+            venue_order_id = $2
+        WHERE id = $1 AND status = 'dispatched'
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(venue_order_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 列出 submitted 状态的指令（reconcile worker 用），按提交时间升序。
+pub async fn list_submitted_copy_orders(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<CopyOrderRow>, DbError> {
+    let rows = sqlx::query_as::<_, CopyOrderRow>(
+        r#"
+        SELECT * FROM account.copy_order
+        WHERE status = 'submitted' AND venue_order_id IS NOT NULL
+        ORDER BY submitted_at ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+
 /// 列出 dispatched_at 早于 cutoff 的 dispatched 指令（reclaim worker 用）。
 /// 这些指令疑似 copier 进程崩溃后卡死，需回收。
 pub async fn list_stale_dispatched(

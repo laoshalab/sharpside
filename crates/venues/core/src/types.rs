@@ -209,6 +209,17 @@ pub enum OrderStatus {
     Rejected,
 }
 
+/// 订单当前成交状态（对账用）。reconcile worker 调 `Venue::order_state` 取此结构回写真实成交。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OrderState {
+    pub status: OrderStatus,
+    /// 已成交股数（部分成交时 >0 且 < 订单 size）。
+    pub filled_size: f64,
+    /// 成交均价（Venue 返回；缺失时由调用方回退到下单价）。
+    pub filled_price: f64,
+    pub fee: f64,
+}
+
 /// 余额/仓位对账结果。对应 `docs/VENUE_DESIGN.md` §3。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Balance {

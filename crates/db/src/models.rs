@@ -260,6 +260,10 @@ pub struct CopyOrderRow {
     pub enqueued_at: DateTime<Utc>,
     /// 进入 dispatched 的时间（claim 时写入；reclaim worker 超时判据）。NULL = 未被 claim。
     pub dispatched_at: Option<DateTime<Utc>>,
+    /// Venue 返回的订单 ID（place_order 成功后写入；reconcile worker 据此查成交）。
+    pub venue_order_id: Option<String>,
+    /// 进入 submitted 的时间（place_order 成功后写入；reconcile worker 超时撤单判据）。
+    pub submitted_at: Option<DateTime<Utc>>,
     pub status: String,
     pub skip_reason: Option<String>,
     /// 信号去重键（migration 0031）。配合 venue-hub signal_outbox 重发幂等：

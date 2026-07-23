@@ -120,8 +120,16 @@ sequenceDiagram
   CPY->>KMS: 解密 encrypted_owner_key + encrypted_l2_secret
   KMS-->>CPY: owner EOA 私钥 + L2 secret
   CPY->>V: sign ERC-7739-wrapped POLY_1271 (signatureType=3, maker=signer=deposit wallet) + L2 HMAC + builderCode → POST /order
-  V-->>CPY: 成交
-  CPY->>DB: INSERT copy_execution + UPDATE status=filled
+  V-->>CPY: orderID（订单被接受，非成交）
+  CPY->>DB: UPDATE status=submitted + venue_order_id + submitted_at（不记成交）
+  Note over CPY,DB: 成交对账 worker（独立轮询）扫 submitted → Venue::order_state
+  CPY->>V: GET /data/order/{id}（L2 HMAC）查真实 status + size_matched
+  alt MATCHED
+    CPY->>DB: INSERT copy_execution(真实 filled_size/filled_price) + UPDATE status=filled
+  else CANCELLED/超时 LIVE
+    CPY->>V: DELETE /order（超时撤单）
+    CPY->>DB: 部分成交记 copy_execution + UPDATE status=cancelled
+  end
   CPY->>TG: 推送成交通知给用户
 ```
 

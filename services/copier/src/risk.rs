@@ -243,6 +243,9 @@ mod tests {
             worker_reclaim_secs: 60,
             dispatched_timeout_secs: 600,
             reclaim_worker_enabled: true,
+            worker_reconcile_secs: 15,
+            reconcile_timeout_secs: 120,
+            reconcile_worker_enabled: true,
             jwt_secret: "test-secret".into(),
         }
     }

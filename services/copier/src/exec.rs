@@ -329,12 +329,24 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
     };
     match venue.place_order(&cred, order_req).await {
         Ok(fill) => {
-            record_fill_with(state, order, &execute_venue, &exec_market_id, &exec_token_id, &fill)
-                .await?;
-            info!(order_id = %order.id, "通道 A 成交");
-            // TODO(L1): 成交后异步通知 tg-bot（HTTP POST 到 tg-bot notify 端点），
-            // 让用户在 TG 收到跟单成交提醒。需 tg-bot 侧新增 notify 端点 + copier 配置
-            // TG_BOT_NOTIFY_URL / TG_BOT_SECRET。发布后按需接入。
+            // P0 成交对账：place_order 返回 orderID 仅代表"订单被 Venue 接受"，非成交。
+            // 限价单可能挂单未成交 / 部分成交。故置 submitted（不记成交），交 reconcile worker
+            // 轮询 Venue::order_state 回写真实 filled_size/filled_price 后才置 filled。
+            // fill.order_id 即 Venue 返回的订单 ID（live 为真实 CLOB orderID）。
+            if let Err(e) =
+                acct::mark_copy_order_submitted(&state.db, order.id, &fill.order_id).await
+            {
+                // 状态回写失败但订单已提交 Venue：置 failed 交人工核对（避免静默卡死）。
+                error!(order_id = %order.id, error = %e, "mark_submitted 失败，订单已提交 Venue，置 failed 交人工核对");
+                return fail(
+                    state,
+                    order.id,
+                    &format!("订单已提交 Venue({}) 但 mark_submitted 失败: {e}", fill.order_id),
+                )
+                .await;
+            }
+            info!(order_id = %order.id, venue_order_id = %fill.order_id, "通道 A 已提交 Venue，置 submitted 待对账");
+            // TODO(L1): 成交后异步通知 tg-bot（由 reconcile worker 在确认 filled 后触发更准确）。
         }
         Err(e) => {
             fail(state, order.id, &format!("place_order 失败: {e}")).await?;
@@ -472,7 +484,7 @@ fn exec_params_for(venue: Platform, min_notional_override: f64) -> ExecParams {
 ///
 /// 通道 A（`channel=tg`，平台代签）要求 `DepositWalletDelegated` 凭证（POLY_1271 委托签名）；
 /// 旧 `Wallet` 凭证（EOA 直签）仅兼容历史用户，对 `tg` 通道会被拒绝以避免误用未委托的 EOA。
-async fn load_credential(
+pub(crate) async fn load_credential(
     state: &AppState,
     user_id: uuid::Uuid,
     venue: Platform,
@@ -531,6 +543,8 @@ mod tests {
             status: "pending".into(),
             enqueued_at: chrono::Utc::now(),
             dispatched_at: None,
+            venue_order_id: None,
+            submitted_at: None,
             signal_id: None,
         }
     }
@@ -803,6 +817,9 @@ mod tests {
             worker_reclaim_secs: 60,
             dispatched_timeout_secs: 600,
             reclaim_worker_enabled: true,
+            worker_reconcile_secs: 15,
+            reconcile_timeout_secs: 120,
+            reconcile_worker_enabled: true,
             jwt_secret: "stage2".into(),
         };
         let mut venue =
