@@ -83,7 +83,7 @@ POLYMARKET_HTTP_PROXY="$PROXY" \
 FOLLOW_URL="$FOLLOW" \
 INTERNAL_SIGNAL_SECRET=e2e-internal-secret \
   cargo test --offline -p sharpside-copier real_copy_trade_e2e -- --ignored --nocapture 2>&1 | \
-  tee /tmp/realtrade_test.log | rg "step|REAL_COPY_TRADE|panicked|assertion|error\[" 
+  tee /tmp/realtrade_test.log | grep -E "step|REAL_COPY_TRADE|panicked|assertion|error\[" 
 
 TEST_RC=${PIPESTATUS[0]}
 echo "=========================================="

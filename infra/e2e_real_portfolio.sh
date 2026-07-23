@@ -55,7 +55,7 @@ SHARPSIDE_KMS_DEV_PLAINTEXT=1 \
 POLYMARKET_HTTP_PROXY="$PROXY" \
 COPIER_URL="$COPIER" \
   cargo test --offline -p sharpside-copier real_portfolio_balance_e2e -- --ignored --nocapture 2>&1 | \
-  tee /tmp/realportfolio_test.log | rg "B\.step|REAL_PORTFOLIO_BALANCE|panicked|assertion|error\[|cash_balance"
+  tee /tmp/realportfolio_test.log | grep -E "B\.step|REAL_PORTFOLIO_BALANCE|panicked|assertion|error\[|cash_balance"
 
 TEST_RC=${PIPESTATUS[0]}
 echo "=========================================="
