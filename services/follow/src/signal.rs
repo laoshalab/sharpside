@@ -64,6 +64,15 @@ pub fn derive_copy_orders(
     let mut out = Vec::new();
     for rel in relations {
         let Some((execute_venue, channel, config)) = parse_relation(rel) else {
+            // P1-11：config/venue/channel 解析失败不再静默丢弃，记 error 便于排查。
+            // 旧逻辑静默 continue：matched_relations 仍计数但 enqueued=0，metrics 误导且无日志。
+            tracing::error!(
+                relation_id = %rel.id,
+                user_id = %rel.user_id,
+                execute_venue = %rel.execute_venue,
+                channel = %rel.channel,
+                "follow_relation 解析失败（config/venue/channel 非法），静默跳过；请核对 relation 配置",
+            );
             continue;
         };
         let matched = match_relation(rel, event, verified_identity_ids);

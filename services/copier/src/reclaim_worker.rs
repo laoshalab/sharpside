@@ -82,6 +82,15 @@ async fn tick(state: &AppState) -> Result<(), anyhow::Error> {
                     Err(e) => error!(order_id = %order.id, error = %e, "回收 dispatched 指令失败"),
                 }
             }
+            RetryOutcome::LeaveDispatched(reason) => {
+                // P1-12：瞬态错误留 dispatched，下轮（60s）重试。不计数 failed。
+                warn!(
+                    order_id = %order.id,
+                    user_id = %order.user_id,
+                    reason = %reason,
+                    "瞬态失败，留 dispatched 下轮重试（不 failed）"
+                );
+            }
         }
     }
     if recovered > 0 || failed > 0 {
@@ -93,6 +102,9 @@ async fn tick(state: &AppState) -> Result<(), anyhow::Error> {
 enum RetryOutcome {
     Recovered(String),
     Failed(String),
+    /// 瞬态错误（凭证加载失败/KMS 抖动）：留 dispatched 下轮重试，不 failed。
+    /// 对齐 reconcile 对 API 瞬态错误的处理；避免 Venue 端可能已有单时误判 failed 成孤儿。
+    LeaveDispatched(String),
 }
 
 /// 对单条超时 dispatched 指令幂等重试 place_order。
@@ -124,7 +136,9 @@ async fn retry_one(state: &AppState, order: &CopyOrderRow) -> RetryOutcome {
     let cred = match load_credential(state, order.user_id, execute_venue, &order.channel).await {
         Ok(c) => c,
         Err(e) => {
-            return RetryOutcome::Failed(format!("加载凭证失败: {e}"))
+            // P1-12：凭证加载失败多为瞬态（DB/KMS 抖动），留 dispatched 下轮（60s）重试，
+            // 对齐 reconcile 对 API 瞬态错误的处理。旧逻辑一次 failed：若 Venue 端已有单 → 孤儿。
+            return RetryOutcome::LeaveDispatched(format!("加载凭证失败（瞬态，留 dispatched 重试）: {e}"))
         }
     };
     let order_req = Order {

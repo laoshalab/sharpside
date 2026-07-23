@@ -96,8 +96,16 @@ async fn tick(
         ) {
             (Some(1.0), _) => ("YES", 2u64),
             (_, Some(1.0)) => ("NO", 1u64),
-            // 已结算但 outcome 不明确，跳过（worker 不阻塞，手动端点兜底）。
-            _ => continue,
+            // P1-16：已结算但 outcome 不明确，warn 升级（旧逻辑静默 continue 无日志，运维无法发现）。
+            // 不阻塞 worker；手动端点兜底。outcome 不明确常见于争议/数据延迟。
+            _ => {
+                warn!(
+                    condition_id = %m.venue_market_id,
+                    outcome_yes = ?m.outcome_yes, outcome_no = ?m.outcome_no,
+                    "市场已结算但 outcome 不明确，跳过自动赎回（手动端点兜底）"
+                );
+                continue;
+            }
         };
 
         // 候选用户集：跟单过该市场的用户（链上 balanceOf 兜底确认）。

@@ -43,6 +43,10 @@ pub async fn run(state: AppState) {
 }
 
 async fn tick(state: &AppState) -> Result<(), anyhow::Error> {
+    // P1-13：先扫 submitted 且 venue_order_id IS NULL 的孤儿单（reconcile 主循环扫不到）。
+    // 这类单无法对账（无 venue_order_id），超时后标 failed 交人工核对，避免永久卡 submitted。
+    sweep_submitted_orphans(state).await;
+
     let pending = acct::list_submitted_copy_orders(&state.db, RECONCILE_BATCH).await?;
     if pending.is_empty() {
         return Ok(());
@@ -55,6 +59,39 @@ async fn tick(state: &AppState) -> Result<(), anyhow::Error> {
         }
     }
     Ok(())
+}
+
+/// P1-13：扫 submitted 且 venue_order_id IS NULL 且超时的孤儿单，标 failed 交人工核对。
+///
+/// 正常 mark_submitted 会写入 venue_order_id；NULL 表示数据异常（部分写入失败/手工改库）。
+/// 主对账循环 `list_submitted_copy_orders` 要求 `venue_order_id IS NOT NULL`，故这类单是盲区。
+async fn sweep_submitted_orphans(state: &AppState) {
+    // 用 reconcile_timeout 作孤儿判定阈值（与正常超时撤单口径一致）。
+    let cutoff = chrono::Utc::now()
+        - chrono::Duration::seconds(state.config.reconcile_timeout_secs.max(120) as i64);
+    let orphans = match acct::list_submitted_orphan_copy_orders(&state.db, cutoff, 50).await {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "扫 submitted 孤儿单失败");
+            return;
+        }
+    };
+    for o in orphans {
+        warn!(
+            order_id = %o.id, user_id = %o.user_id,
+            "submitted 但 venue_order_id 为空（孤儿单），标 failed 交人工核对"
+        );
+        if let Err(e) = acct::update_copy_order_status(
+            &state.db,
+            o.id,
+            "failed",
+            Some("submitted 但 venue_order_id 为空（孤儿单）：无法对账，人工核对 Venue 端"),
+        )
+        .await
+        {
+            error!(order_id = %o.id, error = %e, "标 submitted 孤儿单 failed 失败");
+        }
+    }
 }
 
 async fn reconcile_one(

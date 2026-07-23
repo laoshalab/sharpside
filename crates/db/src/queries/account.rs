@@ -556,6 +556,33 @@ pub async fn list_submitted_copy_orders(
     Ok(rows)
 }
 
+/// P1-13：扫 submitted 且 venue_order_id IS NULL 且超时的孤儿单。
+///
+/// 正常路径 mark_submitted 会写入 venue_order_id；NULL 表示数据异常（部分写入失败/手工改库）。
+/// 这类单 reconcile 扫不到（其查询要求 venue_order_id IS NOT NULL）→ 永久盲区。
+/// 由 sweeper 标 failed 交人工核对，避免无限卡 submitted。
+pub async fn list_submitted_orphan_copy_orders(
+    pool: &PgPool,
+    cutoff: chrono::DateTime<chrono::Utc>,
+    limit: i64,
+) -> Result<Vec<CopyOrderRow>, DbError> {
+    let rows = sqlx::query_as::<_, CopyOrderRow>(
+        r#"
+        SELECT * FROM account.copy_order
+        WHERE status = 'submitted'
+          AND (venue_order_id IS NULL OR venue_order_id = '')
+          AND submitted_at < $1
+        ORDER BY submitted_at ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(cutoff)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// 安全修复 4.1：按 status 计数 copy_order（metrics）。
 pub async fn count_copy_orders_by_status(pool: &PgPool, status: &str) -> Result<i64, DbError> {
     let row: (i64,) = sqlx::query_as(
