@@ -270,3 +270,34 @@ pub async fn latest_trade_ts(
     .await?;
     Ok(row.and_then(|(d,)| d))
 }
+
+/// 复合游标：最新成交的 `(ts, trade_id)`。trade_id 取 tx_hash（链上）或 trade_id（玩钱）。
+///
+/// 同秒多笔成交时，仅靠 `ts > MAX(ts)` 会漏检同秒后续笔。复合游标允许
+/// `t.ts > cursor_ts OR (t.ts == cursor_ts AND t.id > cursor_id)` 过滤，消除同秒漏检。
+///
+/// 返回 None 表示从未轮询过（bootstrap）。trade_id 为空时退化为纯 ts 游标。
+pub async fn latest_trade_cursor(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+) -> Result<Option<(DateTime<Utc>, Option<String>)>, DbError> {
+    // MAX(ts) 对应行的 COALESCE(tx_hash, trade_id)：取该 ts 下任一去重键作游标 id。
+    // 同秒多笔时取其一即可——过滤用 ts==cursor_ts 的全部笔都会被拉到（id 比较仅作 tiebreak）。
+    let row: Option<(Option<DateTime<Utc>>, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT MAX(ts), (
+            SELECT COALESCE(tx_hash, trade_id)
+            FROM trader_hub.raw_trades r2
+            WHERE r2.platform = $1 AND r2.address = $2 AND r2.ts = (SELECT MAX(ts) FROM trader_hub.raw_trades WHERE platform = $1 AND address = $2)
+            LIMIT 1
+        )
+        FROM trader_hub.raw_trades WHERE platform = $1 AND address = $2
+        "#,
+    )
+    .bind(platform)
+    .bind(address)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(ts, id)| ts.map(|t| (t, id))))
+}

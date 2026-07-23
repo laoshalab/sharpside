@@ -101,6 +101,19 @@ pub trait Venue: Send + Sync {
         Err(VenueError::Unsupported("balance"))
     }
 
+    /// 某 outcome token 的链上持仓量（SELL 前校验，防无仓位下单被拒）。
+    ///
+    /// `token_id` 为 ERC-1155 positionId 的十进制字符串（Polymarket 口径）；
+    /// 返回 deposit wallet 的该 token balanceOf（人类单位，1:1 collateral）。
+    /// 默认 Unsupported，仅链上可读的 Venue（Polymarket）实现。
+    async fn outcome_token_balance(
+        &self,
+        _cred: &Credential,
+        _token_id: &str,
+    ) -> Result<f64, VenueError> {
+        Err(VenueError::Unsupported("outcome_token_balance"))
+    }
+
     /// 链上余额兜底（无需 CLOB 凭证）：直接 RPC 读 collateral ERC-20 `balanceOf(deposit_wallet)`。
     ///
     /// 用于离线预配（`provision_live=false`）等 CLOB 不可用场景，展示 Deposit Wallet 的

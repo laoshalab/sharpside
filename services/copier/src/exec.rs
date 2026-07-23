@@ -309,6 +309,34 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
         return skip(state, order.id, &reason).await;
     }
 
+    // P0-4：SELL 前校验 outcome token 链上持仓，防无仓位下单被 CLOB 拒（failed）或部分成交卡 submitted。
+    // BUY 不需此校验（买方付 USDC，由 min_dw_balance 兜底）。RPC 失败 fail-closed skip（不下单）。
+    if exec_side == Side::Sell {
+        match venue.outcome_token_balance(&cred, &exec_token_id).await {
+            Ok(bal) => {
+                if bal < exec_size {
+                    return skip(
+                        state,
+                        order.id,
+                        &format!(
+                            "SELL 持仓不足：链上 token 余额 {bal:.4} < 下单股数 {exec_size:.4}（token_id={})",
+                            exec_token_id
+                        ),
+                    )
+                    .await;
+                }
+            }
+            Err(e) => {
+                return skip(
+                    state,
+                    order.id,
+                    &format!("SELL 持仓校验失败（fail-closed 不下单）: {e}"),
+                )
+                .await;
+            }
+        }
+    }
+
     // 最低余额校验：DW pUSD 余额 < min_dw_balance 则 skip（防充值不足下单被拒）。
     // RISK_MIN_DW_BALANCE 默认 50 USDC。balance() 拉取失败保守 skip（不下单）。
     if state.config.min_dw_balance > 0.0 {

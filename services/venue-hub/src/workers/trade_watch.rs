@@ -55,56 +55,98 @@ async fn tick_once(state: &AppState) -> Result<(), anyhow::Error> {
             }
         };
         for w in &targets {
-            // 增量游标：该地址在 raw_trades 中的最新成交 ts。None = 从未轮询过（bootstrap）。
-            let cursor = match raw::latest_trade_ts(&state.db, platform.as_str(), &w.address).await {
+            // 增量游标：(ts, trade_id)。None = 从未轮询过（bootstrap）。
+            // 复合游标消除同秒多笔漏检（旧 ts > MAX(ts) 会跳过同秒后续笔）。
+            let cursor = match raw::latest_trade_cursor(&state.db, platform.as_str(), &w.address).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(
                         platform = platform.as_str(), address = %w.address, error = %e,
-                        "读 latest_trade_ts 失败，跳过该地址本轮",
+                        "读 latest_trade_cursor 失败，跳过该地址本轮",
                     );
                     continue;
                 }
             };
-            let trades = match venue
-                .trades(&w.address, Pagination { limit: TRADE_PAGE_LIMIT, offset: 0 })
-                .await
-            {
-                Ok(t) => t,
-                Err(VenueError::Unsupported(_)) => continue,
-                Err(e) => {
-                    tracing::warn!(
-                        platform = platform.as_str(), address = %w.address, error = %e,
-                        "trade_watch 拉 trades 失败",
-                    );
-                    continue;
+
+            // 翻页拉取：最新优先，按 offset 翻页直到无新成交或达页数上限。
+            // 爆发成交（一轮 >200 笔）时单页截断会永久丢失，翻页追上为止。
+            const MAX_PAGES: u32 = 5;
+            let mut all_new_trades: Vec<sharpside_venues_core::Trade> = Vec::new();
+            let mut offset = 0u32;
+            let mut exhausted = false;
+            for _ in 0..MAX_PAGES {
+                let trades = match venue
+                    .trades(&w.address, Pagination { limit: TRADE_PAGE_LIMIT, offset })
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(VenueError::Unsupported(_)) => break,
+                    Err(e) => {
+                        tracing::warn!(
+                            platform = platform.as_str(), address = %w.address, error = %e,
+                            "trade_watch 拉 trades 失败（offset={}）", offset,
+                        );
+                        break;
+                    }
+                };
+                if trades.is_empty() {
+                    exhausted = true;
+                    break;
                 }
-            };
-            // bootstrap：cursor 为空时只记基线（最新一条成交 ts），不 emit，避免把历史成交全发一遍。
-            // 下一轮起 cursor 非空，只 emit ts > cursor 的新成交。
-            if cursor.is_none() {
-                if let Some(latest) = trades.first() {
-                    if let Err(e) = upsert_raw_trade(state, platform, &w.address, latest).await {
-                        tracing::warn!(address = %w.address, error = %e, "bootstrap 写基线 raw_trade 失败");
+                // bootstrap：cursor 为空时只记基线（最新一条），不 emit。
+                if cursor.is_none() {
+                    if let Some(latest) = trades.first() {
+                        if let Err(e) = upsert_raw_trade(state, platform, &w.address, latest).await {
+                            tracing::warn!(address = %w.address, error = %e, "bootstrap 写基线 raw_trade 失败");
+                        }
+                    }
+                    tracing::info!(
+                        platform = platform.as_str(), address = %w.address,
+                        "trade_watch bootstrap：仅记基线，本轮不 emit",
+                    );
+                    exhausted = true;
+                    break;
+                }
+                let (cursor_ts, cursor_id) = cursor.as_ref().unwrap();
+                // 复合游标过滤：ts > cursor_ts，或同秒且 id > cursor_id（消除同秒漏检）。
+                // /trades 最新优先，故越往后越旧；一旦遇到 ts < cursor_ts 的，后续全是旧的，可提前终止。
+                let mut page_new = 0u32;
+                let mut hit_old = false;
+                for t in &trades {
+                    let id = t.tx_hash.as_deref();
+                    let is_new = match id {
+                        Some(id_str) if Some(id_str) == cursor_id.as_deref() => false,
+                        _ => t.ts > *cursor_ts
+                            || (t.ts == *cursor_ts && id.is_some() && id > cursor_id.as_deref()),
+                    };
+                    if is_new {
+                        all_new_trades.push(t.clone());
+                        page_new += 1;
+                    } else if t.ts < *cursor_ts {
+                        hit_old = true;
                     }
                 }
-                tracing::info!(
+                // 本页无新成交，或已遇到旧成交（后续更旧），翻页终止。
+                if page_new == 0 || hit_old || trades.len() < TRADE_PAGE_LIMIT as usize {
+                    exhausted = true;
+                    break;
+                }
+                offset += TRADE_PAGE_LIMIT;
+            }
+            if !exhausted && all_new_trades.len() as u32 >= MAX_PAGES * TRADE_PAGE_LIMIT {
+                tracing::warn!(
                     platform = platform.as_str(), address = %w.address,
-                    "trade_watch bootstrap：仅记基线，本轮不 emit",
+                    n = all_new_trades.len(),
+                    "trade_watch 翻 {} 页仍追不上（爆发成交），剩余由 hot 对账补漏", MAX_PAGES,
                 );
+            }
+            if all_new_trades.is_empty() {
                 continue;
             }
-            let cursor_ts = cursor.unwrap();
             // /trades 最新优先；按 ts 升序处理，保证同窗口覆盖检查时序正确。
-            let mut new_trades: Vec<_> = trades
-                .into_iter()
-                .filter(|t| t.ts > cursor_ts)
-                .collect();
-            new_trades.sort_by_key(|t| t.ts);
+            all_new_trades.sort_by_key(|t| t.ts);
+            let new_trades = all_new_trades;
 
-            if new_trades.is_empty() {
-                continue;
-            }
             // 先写信号账，写成功的才 emit。写失败则跳过该笔（不 emit）：
             // 游标取 raw_trades 的 MAX(ts)，写失败即游标未前进，下一轮会重拉该笔重试。
             // 关键：若写失败仍 emit，hot 对账会因 covered 少计而补发 diff（不同 signal_id）→ 双发。

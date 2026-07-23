@@ -574,7 +574,42 @@ impl Venue for PolymarketVenue {
             .map_err(VenueError::Internal)
     }
 
-    /// 提现：从 deposit wallet 转出 pUSD 到外部地址。对应 `docs/CHANNEL_A_SIGNING.md` §4.1。
+    /// 某 outcome token 的链上持仓量（SELL 前校验用）。
+    /// token_id 为 ERC-1155 positionId 的十进制字符串 → CTF.balanceOf(deposit_wallet)。
+    async fn outcome_token_balance(
+        &self,
+        cred: &Credential,
+        token_id: &str,
+    ) -> Result<f64, VenueError> {
+        let Credential::DepositWalletDelegated {
+            deposit_wallet_address,
+            ..
+        } = cred
+        else {
+            return Err(VenueError::Auth(
+                "outcome_token_balance 仅支持 DepositWalletDelegated 凭证".into(),
+            ));
+        };
+        let dw: Address = deposit_wallet_address
+            .parse()
+            .map_err(|e| VenueError::Auth(format!("deposit_wallet_address 解析失败: {e}")))?;
+        let rpc_url = std::env::var("POLYGON_RPC_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| crate::onchain::POLYGON_RPC_DEFAULT.to_string());
+        let ctf = crate::wallet_batch::contracts::CONDITIONAL_TOKENS
+            .parse::<Address>()
+            .map_err(|e| VenueError::Internal(format!("CTF 地址解析失败: {e}")))?;
+        // token_id 是 positionId 的十进制字符串（redeem worker 同口径）。
+        let position_id: U256 = token_id
+            .parse()
+            .map_err(|e| VenueError::Internal(format!("token_id 解析为 positionId 失败: {e}")))?;
+        crate::onchain::ctf_balance_of(&rpc_url, ctf, dw, position_id)
+            .await
+            .map_err(VenueError::Internal)
+    }
+
     ///
     /// 链路：解出 owner EOA 私钥（KMS）→ 构造 `pUSD.transfer(to, amount)` calldata →
     /// 取 relayer WALLET nonce → owner 对 `DepositWallet.Batch` 签 EIP-712 → relayer `WALLET` batch

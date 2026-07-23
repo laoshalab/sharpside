@@ -67,8 +67,9 @@ pub async fn run(state: AppState) {
                 for w in &targets {
                     match venue.positions(&w.address).await {
                         Ok(positions) => {
-                            // 1. 写新快照（推进 last_scanned_at，供下轮 prev 用）
-                            let now = chrono::Utc::now();
+                            // 1. 记录本轮扫描时刻（对账窗口上界用，先于快照写入）。
+                            let t_now = chrono::Utc::now();
+                            // 2. 写新快照（推进 last_scanned_at，供下轮 prev 用）
                             for p in &positions {
                                 let _ = monitor::insert_position_snapshot(
                                     &state.db,
@@ -80,19 +81,20 @@ pub async fn run(state: AppState) {
                                     p.avg_price,
                                     p.current_price,
                                     p.pnl,
-                                    now,
+                                    t_now,
                                 )
                                 .await;
                             }
-                            // 2. 对账补漏（落后一轮闭合窗口 + 覆盖检查）
+                            // 3. 对账补漏（落后一轮闭合窗口 + 覆盖检查）
                             let signals = reconcile_positions(
                                 platform,
                                 &w.address,
                                 w.identity_id,
+                                t_now,
                                 &state,
                             )
                             .await;
-                            // 3. emit 残差信号
+                            // 4. emit 残差信号
                             emit_signals(&state, signals).await;
                         }
                         Err(sharpside_venues_core::VenueError::Unsupported(_)) => {}
@@ -109,16 +111,20 @@ pub async fn run(state: AppState) {
 
 /// 对账补漏：prev（上一轮）vs prev_prev（再上一轮）的仓位 Δ，减去 raw_trades 已覆盖量，残差才 emit。
 ///
-/// 落后一轮闭合窗口：窗口 [T_prev_prev, T_prev] 完全闭合，trade_watch 已轮询过，覆盖查询无竞态。
-/// 需要至少两轮快照（prev + prev_prev）才能对账；不足则静默（bootstrap）。
+/// 落后一轮闭合窗口：`t_now` 为本轮扫描时刻（已写入本轮快照）。
+/// prev = `latest_snapshots_before(t_now)`（严格早于本轮的最近一轮，即上一轮 T_prev）；
+/// prev_prev = `latest_snapshots_before(t_prev)`（再上一轮 T_prev_prev）。
+/// 窗口 [T_prev_prev, T_prev] 完全落在上一轮之前，trade_watch（3s 轮询）早已覆盖，无竞态、无双计。
+/// 需要至少两轮历史快照；不足则静默（bootstrap）。
 async fn reconcile_positions(
     platform: Platform,
     address: &str,
     identity_id: Option<uuid::Uuid>,
+    t_now: chrono::DateTime<chrono::Utc>,
     state: &AppState,
 ) -> Vec<SignalPayload> {
-    // prev = 上一轮快照（T_prev）。注意：本轮 current 已写入，故 latest_snapshots 返回的是上一轮。
-    let prev = match monitor::latest_snapshots(&state.db, platform.as_str(), address).await {
+    // prev = 上一轮快照（严格早于本轮 t_now）。本轮快照已写入但被 < t_now 排除。
+    let prev = match monitor::latest_snapshots_before(&state.db, platform.as_str(), address, t_now).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(platform = platform.as_str(), address, error = %e, "对账读 prev 快照失败，本轮不 emit");
