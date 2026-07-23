@@ -1,11 +1,18 @@
 //! Polymarket 原始 HTTP 客户端。对应 `docs/DATA_SOURCES.md` §2-§4。
 //!
 //! 封装 Data / Gamma / CLOB 三套公开 API（读免鉴权）。
-//! 限流由调用方（venue-hub worker）按 `trades_rpm`/`positions_rpm` 控制，本客户端不做。
+//! **出站限流在 adapter 内**（Phase A 落地 `docs/VENUE_DESIGN.md §9`）：按端点配额的 governor
+//! 令牌桶，超限 `await` 节流（平滑突发），并对上游 429 退避重试一次后映射为
+//! `VenueError::RateLimited`。worker 侧不再各自 sleep。
 
 use crate::dto::{BookDto, ClobMarketDto, LeaderboardEntry, MarketDto, PositionDto, TradeDto};
+use governor::{DefaultDirectRateLimiter, Quota};
 use reqwest::Client;
 use serde::Deserialize;
+use sharpside_venues_core::VenueError;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// 构造带可选代理的 reqwest 客户端。
 ///
@@ -50,6 +57,33 @@ pub const DATA_API_DEFAULT: &str = "https://data-api.polymarket.com";
 pub const GAMMA_API_DEFAULT: &str = "https://gamma-api.polymarket.com";
 pub const CLOB_API_DEFAULT: &str = "https://clob.polymarket.com";
 
+/// 按端点分桶的出站限流器。配额取自 `docs/DATA_SOURCES.md` §5 并留约 1/3 余量：
+/// `/positions` ~150 req/10s → 10/s、`/trades` ~200 req/10s → 12/s、`/value`/`/leaderboard` 无独立配额
+/// 按 Data API 总体 ~1000 req/10s 取保守值。突发容量 = 1s 配额（governor 令牌桶默认行为）。
+type DirectLimiter = DefaultDirectRateLimiter;
+
+struct RateLimits {
+    positions: DirectLimiter,
+    trades: DirectLimiter,
+    value: DirectLimiter,
+    leaderboard: DirectLimiter,
+}
+
+/// 构造每秒 `rps` 的限流器，突发容量 = 1s 配额。
+fn make_limiter(rps: u32) -> DirectLimiter {
+    let n = NonZeroU32::new(rps.max(1)).unwrap();
+    DirectLimiter::direct(Quota::per_second(n).allow_burst(n))
+}
+
+fn default_rate_limits() -> RateLimits {
+    RateLimits {
+        positions: make_limiter(10),
+        trades: make_limiter(12),
+        value: make_limiter(8),
+        leaderboard: make_limiter(5),
+    }
+}
+
 /// Polymarket 三 API 客户端。
 #[derive(Clone)]
 pub struct PolymarketClient {
@@ -57,6 +91,7 @@ pub struct PolymarketClient {
     gamma_api: String,
     clob_api: String,
     http: Client,
+    limiter: Arc<RateLimits>,
 }
 
 impl PolymarketClient {
@@ -72,7 +107,61 @@ impl PolymarketClient {
             gamma_api: gamma_api.trim_end_matches('/').into(),
             clob_api: clob_api.trim_end_matches('/').into(),
             http: build_http_client(std::time::Duration::from_secs(15)),
+            limiter: Arc::new(default_rate_limits()),
         }
+    }
+
+    /// 用自定义限流配额构造（测试 / 联调放宽配额用）。`rps` 为 0 时按 1 处理。
+    pub fn with_limiter(
+        data_api: &str,
+        gamma_api: &str,
+        clob_api: &str,
+        positions_rps: u32,
+        trades_rps: u32,
+        value_rps: u32,
+        leaderboard_rps: u32,
+    ) -> Self {
+        Self {
+            data_api: data_api.trim_end_matches('/').into(),
+            gamma_api: gamma_api.trim_end_matches('/').into(),
+            clob_api: clob_api.trim_end_matches('/').into(),
+            http: build_http_client(std::time::Duration::from_secs(15)),
+            limiter: Arc::new(RateLimits {
+                positions: make_limiter(positions_rps),
+                trades: make_limiter(trades_rps),
+                value: make_limiter(value_rps),
+                leaderboard: make_limiter(leaderboard_rps),
+            }),
+        }
+    }
+
+    /// 令牌桶节流：超限时每 10ms 重试，直到拿到令牌。把突发平滑成匀速流，不丢请求。
+    async fn acquire(&self, limiter: &DirectLimiter) {
+        while limiter.check().is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// 节流 + GET + JSON 解析，并对上游 429 退避重试一次。仍 429 则映射为 `VenueError::RateLimited`。
+    async fn get_limited<T: for<'de> Deserialize<'de>>(
+        &self,
+        limiter: &DirectLimiter,
+        url: &str,
+        params: &[(&str, &str)],
+    ) -> Result<T, VenueError> {
+        self.acquire(limiter).await;
+        let resp = self.http.get(url).query(params).send().await?;
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            tracing::warn!(url, "Polymarket 上游 429，退避 500ms 重试一次");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            self.acquire(limiter).await;
+            let resp2 = self.http.get(url).query(params).send().await?;
+            if resp2.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(VenueError::RateLimited);
+            }
+            return Ok(resp2.json().await?);
+        }
+        Ok(resp.json().await?)
     }
 
     /// Gamma API base（只读探针/测试用）。
@@ -180,10 +269,10 @@ impl PolymarketClient {
         order_by: &str,
         limit: u32,
         offset: u32,
-    ) -> Result<Vec<LeaderboardEntry>, reqwest::Error> {
+    ) -> Result<Vec<LeaderboardEntry>, VenueError> {
         let url = format!("{}/v1/leaderboard", self.data_api);
-        get_json(
-            &self.http,
+        self.get_limited(
+            &self.limiter.leaderboard,
             &url,
             &[
                 ("category", category),
@@ -197,16 +286,18 @@ impl PolymarketClient {
     }
 
     /// `GET /positions?user={addr}`（Data API）。
-    pub async fn positions(&self, user: &str) -> Result<Vec<PositionDto>, reqwest::Error> {
+    pub async fn positions(&self, user: &str) -> Result<Vec<PositionDto>, VenueError> {
         let url = format!("{}/positions", self.data_api);
-        get_json(&self.http, &url, &[("user", user)]).await
+        self.get_limited(&self.limiter.positions, &url, &[("user", user)])
+            .await
     }
 
     /// `GET /value?user={addr}`（Data API）。当前持仓总 USD 估值（快照，非时间序列）。
     /// worker 周期快照积累历史后按周期算 delta，近似非榜地址的官方盈亏。
-    pub async fn value(&self, user: &str) -> Result<Vec<crate::dto::ValueDto>, reqwest::Error> {
+    pub async fn value(&self, user: &str) -> Result<Vec<crate::dto::ValueDto>, VenueError> {
         let url = format!("{}/value", self.data_api);
-        get_json(&self.http, &url, &[("user", user)]).await
+        self.get_limited(&self.limiter.value, &url, &[("user", user)])
+            .await
     }
 
     /// `GET /trades`（Data API）。最新优先，分页。
@@ -215,10 +306,10 @@ impl PolymarketClient {
         user: &str,
         limit: u32,
         offset: u32,
-    ) -> Result<Vec<TradeDto>, reqwest::Error> {
+    ) -> Result<Vec<TradeDto>, VenueError> {
         let url = format!("{}/trades", self.data_api);
-        get_json(
-            &self.http,
+        self.get_limited(
+            &self.limiter.trades,
             &url,
             &[
                 ("user", user),
@@ -624,6 +715,31 @@ mod tests {
         assert_eq!(c.data_api, DATA_API_DEFAULT);
         assert_eq!(c.gamma_api, GAMMA_API_DEFAULT);
         assert_eq!(c.clob_api, CLOB_API_DEFAULT);
+    }
+
+    #[test]
+    fn rate_limits_default_constructs() {
+        // 默认配额构造不 panic，且各端点限流器独立。
+        let _ = default_rate_limits();
+        let l = make_limiter(0);
+        // rps=0 按 1 处理：首个令牌必可得（突发桶 ≥1）。
+        assert!(l.check().is_ok());
+    }
+
+    #[test]
+    fn limiter_enforces_quota_nonblocking() {
+        // rps=1、突发=1：首个 check 放行，第二个立即被拒（非阻塞，证明令牌桶真实生效）。
+        let l = make_limiter(1);
+        assert!(l.check().is_ok());
+        assert!(l.check().is_err());
+    }
+
+    #[test]
+    fn limiter_shared_across_clones() {
+        // clone 后共享同一 Arc<RateLimits>：所有副本共用令牌桶，限流在进程内全局生效。
+        let c = PolymarketClient::with_limiter("d", "g", "c", 10, 12, 8, 5);
+        let c2 = c.clone();
+        assert!(Arc::ptr_eq(&c.limiter, &c2.limiter));
     }
 
     #[test]

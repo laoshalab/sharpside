@@ -558,7 +558,7 @@ CREATE TABLE trader_hub.hot_wallets (
 );
 ```
 
-`VenueHub` 的 hot wallet worker 按 `platform` 分组，调对应 `Venue::positions` 抓快照，写入 `trader_positions_snapshot`（带 `platform` 列）。频率按 `scan_interval_secs` 自适应（10–60s）。
+`VenueHub` 的 hot wallet worker 按 `platform` 分组，调对应 `Venue::positions` 抓快照，写入 `trader_positions_snapshot`（带 `platform` 列）。频率按 `scan_interval_secs` 自适应（10–60s）——Phase B 已落地：`list_due_signal_targets` 只返回到期目标（`last_scanned_at + interval_secs <= now()`，`last_scanned_at` 派生自快照 `max(captured_at)`），`hot_secs` 降为调度节拍（默认 5s），跟随类用 `follow_scan_secs`（默认 30s），每 tick `hot_due_cap` 上限防 bootstrap 风暴。出站限流见 §9。
 
 ## 9. 限流（per Venue）
 
@@ -573,6 +573,8 @@ CREATE TABLE trader_hub.hot_wallets (
 | Manifold | REST | 未公开，保守 10 QPS |
 
 `Venue` trait 不暴露限流细节，adapter 内部自管；上层只看到 `VenueError::RateLimited`。
+
+> **Phase A 已落地（Polymarket）**：`PolymarketClient` 持按端点分桶的 `governor::DefaultDirectRateLimiter`（`/positions` 10/s、`/trades` 12/s、`/value` 8/s、`/leaderboard` 5/s，留约 1/3 余量）。超限 `await` 节流（每 10ms 重试令牌桶），上游 429 退避 500ms 重试一次后映射为 `VenueError::RateLimited`。clone 共享同一 `Arc<RateLimits>`，进程内全局生效。
 
 ## 10. 错误兜底与降级
 

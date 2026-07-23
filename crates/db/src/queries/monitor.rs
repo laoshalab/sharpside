@@ -25,11 +25,19 @@ pub async fn list_enabled_hot_wallets(
     Ok(rows)
 }
 
-/// 列出某 Venue 的全部信号监控目标：热钥 ∪ 活跃直接跟随 ∪ 活跃 identity 跟随下的各 trader。
+/// 列出某 Venue **到期**的信号监控目标：热钥 ∪ 活跃直接跟随 ∪ 活跃 identity 跟随下的各 trader。
+///
+/// 自适应扫描（Phase B）：只返回"到期"的目标——`last_scanned_at IS NULL`（从未扫描，bootstrap）
+/// 或 `last_scanned_at + interval_secs <= now()`。`last_scanned_at` 派生自 `trader_positions_snapshot`
+/// 的 `max(captured_at)`（每次扫描都写快照，故可作 last_scanned 代理，且对热钥/跟随统一生效，无需新列）。
+/// `interval_secs`：热钥取 `hot_wallets.scan_interval_secs`，跟随类取 `$2`（全局 `follow_scan_secs`）。
+/// `due_cap`（$3）限制每 tick 最多取多少到期目标，防 bootstrap 风暴 + 平滑突发。
 /// 同一 address 去重；附 `identity_id`（来自 trader_hub.traders）以让 identity 跟随命中。
-pub async fn list_signal_targets(
+pub async fn list_due_signal_targets(
     pool: &PgPool,
     platform: &str,
+    follow_interval_secs: i32,
+    due_cap: i64,
 ) -> Result<Vec<SignalTarget>, DbError> {
     let rows = sqlx::query_as::<_, SignalTarget>(
         r#"
@@ -47,7 +55,7 @@ pub async fn list_signal_targets(
             WHERE fr.active AND fr.deleted_at IS NULL AND fr.follow_identity_id IS NOT NULL
         ),
         hot AS (
-            SELECT address FROM trader_hub.hot_wallets WHERE platform = $1 AND enabled = true
+            SELECT address, scan_interval_secs FROM trader_hub.hot_wallets WHERE platform = $1 AND enabled = true
         ),
         all_addr AS (
             SELECT address FROM direct
@@ -55,14 +63,32 @@ pub async fn list_signal_targets(
             SELECT address FROM ident_traders
             UNION
             SELECT address FROM hot
+        ),
+        addr_meta AS (
+            SELECT a.address,
+                   COALESCE(h.scan_interval_secs, $2) AS interval_secs,
+                   (
+                       SELECT MAX(s.captured_at)
+                       FROM trader_hub.trader_positions_snapshot s
+                       WHERE s.platform = $1 AND s.address = a.address
+                   ) AS last_scanned_at
+            FROM all_addr a
+            LEFT JOIN trader_hub.hot_wallets h
+              ON h.platform = $1 AND h.address = a.address
         )
-        SELECT a.address, t.identity_id
-        FROM all_addr a
+        SELECT m.address, t.identity_id, m.interval_secs, m.last_scanned_at
+        FROM addr_meta m
         LEFT JOIN trader_hub.traders t
-          ON t.platform = $1 AND t.address = a.address
+          ON t.platform = $1 AND t.address = m.address
+        WHERE m.last_scanned_at IS NULL
+           OR m.last_scanned_at + m.interval_secs * interval '1 second' <= now()
+        ORDER BY m.last_scanned_at NULLS FIRST
+        LIMIT $3
         "#,
     )
     .bind(platform)
+    .bind(follow_interval_secs)
+    .bind(due_cap)
     .fetch_all(pool)
     .await?;
     Ok(rows)

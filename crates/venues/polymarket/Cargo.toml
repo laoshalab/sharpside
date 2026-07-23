@@ -31,5 +31,8 @@ hex.workspace = true
 # relayer poll_confirmed 用 tokio::time::sleep。
 tokio = { workspace = true, features = ["time"] }
 
+# 出站限流（Phase A）：adapter 内按端点配额 governor 令牌桶，平滑 worker 突发、防 Polymarket 429。
+governor.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -39,8 +39,12 @@ struct SignalPayload {
 const DELTA_EPSILON: f64 = 1e-6;
 
 pub async fn run(state: AppState) {
-    let interval = state.config.workers.hot_secs.max(1);
-    let mut ticker = tokio::time::interval(Duration::from_secs(interval));
+    // hot_secs 现为调度节拍（自适应扫描 Phase B）：每这么久检查一次"谁到期"。
+    // 真实扫描周期 = 热钥 per-row scan_interval_secs / 跟随类 follow_scan_secs。
+    let tick = state.config.workers.hot_secs.max(1);
+    let follow_interval = state.config.workers.follow_scan_secs.max(1) as i32;
+    let due_cap = state.config.workers.hot_due_cap.max(1) as i64;
+    let mut ticker = tokio::time::interval(Duration::from_secs(tick));
     loop {
         ticker.tick().await;
         for platform in enabled_signal_sources(&state.config.venues) {
@@ -52,12 +56,17 @@ pub async fn run(state: AppState) {
                 {
                     continue;
                 }
-                let targets = match monitor::list_signal_targets(&state.db, platform.as_str())
-                    .await
+                let targets = match monitor::list_due_signal_targets(
+                    &state.db,
+                    platform.as_str(),
+                    follow_interval,
+                    due_cap,
+                )
+                .await
                 {
                     Ok(t) => t,
                     Err(e) => {
-                        tracing::warn!(platform = platform.as_str(), error = %e, "hot 读监控目标清单失败");
+                        tracing::warn!(platform = platform.as_str(), error = %e, "hot 读到期监控目标清单失败");
                         continue;
                     }
                 };

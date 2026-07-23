@@ -73,6 +73,8 @@ mod tests {
                 identity_secs: 1,
                 perf_secs: 1,
                 hot_secs: 1,
+                follow_scan_secs: 1,
+                hot_due_cap: 1,
                 official_pnl_secs: 1,
                 official_value_batch: 10,
                 backfill_secs: 1,

@@ -60,7 +60,10 @@ perf worker 读 `raw_trades` → `sharpside_perf::reconstruct_position_timeline`
 覆盖写 `position_timeline` / `trader_equity_curve` / `trader_performance` / `trader_tag`。
 
 > 限流：Polymarket 公开 API 无公开配额承诺，`WORKER_INGEST_SECS` 不宜过小（生产建议 ≥300s）。
-> adapter 内部不在客户端限流，由 worker 间隔控制。
+> adapter 出站限流已在客户端内（Phase A）：`PolymarketClient` 按端点配额持 governor 令牌桶
+> （`/positions` 10/s、`/trades` 12/s、`/value` 8/s、`/leaderboard` 5/s），超限 `await` 节流 +
+> 上游 429 退避重试一次后映射为 `VenueError::RateLimited`。故 `WORKER_HOT_SECS` 可较激进下调
+> 而不致打爆 Polymarket（突发由令牌桶平滑）。
 
 ## 4. 受限网络 / 离线联调（本地 Mock）
 

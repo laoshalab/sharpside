@@ -7,7 +7,8 @@
 //! 设计要点：
 //! - **DTO 与 domain 分离**：`dto.rs` 是 API 原始响应，`lib.rs` 负责映射到 `venues::core` 通用类型
 //! - **参数映射**：通用 `LeaderboardQuery.time_period`（`1d`/`1w`/`1m`/`1y`/`ytd`/`all`）映射到 Polymarket 的 `DAY`/`WEEK`/`MONTH`/`ALL`
-//! - **限流不在 adapter 内**：由 venue-hub worker 按 `trades_rpm`/`positions_rpm` 控制
+//! - **限流在 adapter 内**（Phase A 落地 `docs/VENUE_DESIGN.md §9`）：`PolymarketClient` 按端点
+//!   配额持 governor 令牌桶，超限 `await` 节流 + 上游 429 退避重试，映射为 `VenueError::RateLimited`
 
 #![forbid(unsafe_code)]
 

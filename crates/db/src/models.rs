@@ -155,6 +155,10 @@ pub struct HotWallet {
 pub struct SignalTarget {
     pub address: String,
     pub identity_id: Option<Uuid>,
+    /// 该目标的扫描间隔（秒）：热钥取 `hot_wallets.scan_interval_secs`，跟随类取全局 `follow_scan_secs`。
+    pub interval_secs: i32,
+    /// 最近一次扫描时间：派生自 `trader_positions_snapshot` 的 `max(captured_at)`；NULL 表示从未扫描（bootstrap）。
+    pub last_scanned_at: Option<DateTime<Utc>>,
 }
 
 /// `trader_hub.trader_positions_snapshot` 行。对应 `docs/VENUEHUB_STORAGE.md` §7。

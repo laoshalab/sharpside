@@ -62,7 +62,14 @@ pub struct WorkerIntervals {
     pub mapping_secs: u64,
     pub identity_secs: u64,
     pub perf_secs: u64,
+    /// hot worker 调度节拍（秒）：每这么久检查一次"谁到期了"。自适应扫描下这只是检查频率，
+    /// 不是扫描间隔——真实扫描周期由热钥 per-row `scan_interval_secs` / 跟随类 `follow_scan_secs` 决定。
+    /// 可激进下调（如 2–5s）：到期目标的拉取由 Phase A 的 governor 令牌桶节流，不会打爆 Polymarket。
     pub hot_secs: u64,
+    /// 跟随类目标（直接跟随 / identity 跟随）的扫描间隔（秒）。热钥用其 per-row `scan_interval_secs`。
+    pub follow_scan_secs: u64,
+    /// 每 tick 最多扫描的到期目标数（防 bootstrap 风暴 + 平滑突发）。
+    pub hot_due_cap: u64,
     /// official_pnl worker 间隔（秒）：抓 Polymarket 排行榜官方盈亏写回 `official_pnl` 列。
     pub official_pnl_secs: u64,
     /// 每 tick 拉取 `/value` 快照的候选地址上限（缓解 rate limit）。非榜地址靠积累的快照算 delta。
@@ -123,7 +130,9 @@ impl Config {
                 mapping_secs: parse_u64("WORKER_MAPPING_SECS", 600),
                 identity_secs: parse_u64("WORKER_IDENTITY_SECS", 600),
                 perf_secs: parse_u64("WORKER_PERF_SECS", 900),
-                hot_secs: parse_u64("WORKER_HOT_SECS", 30),
+                hot_secs: parse_u64("WORKER_HOT_SECS", 5),
+                follow_scan_secs: parse_u64("WORKER_FOLLOW_SCAN_SECS", 30),
+                hot_due_cap: parse_u64("WORKER_HOT_DUE_CAP", 50),
                 official_pnl_secs: parse_u64("WORKER_OFFICIAL_PNL_SECS", 600),
                 official_value_batch: parse_u64("WORKER_OFFICIAL_VALUE_BATCH", 100) as i64,
                 backfill_secs: parse_u64("WORKER_BACKFILL_SECS", 120),
