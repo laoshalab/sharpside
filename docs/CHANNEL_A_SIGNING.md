@@ -218,9 +218,8 @@ Fill → copy_execution
 ## 7. 待办（需网络/外部依赖）
 
 - [~] Polymarket Builder API key 申请（builderCode / secret / passphrase）
-  - ✅ `POLYMARKET_BUILDER_API_KEY=019f691f-178d-7b2a-938c-65a28d3f0e92`（来源 `~/文档/sharpside/.env`，= RELAYER_API_KEY 回退）已填入 `.env`
-  - ✅ `POLYMARKET_BUILDER_CODE=0x599ec9d1...3a17b92a`、`POLYMARKET_BUILDER_ADDRESS=0x1c404b67...beb388`、`POLYMARKET_RELAYER_URL` / `_API_KEY_ADDRESS=0x9CC0...bb5c` / `_PROXY` 已填入 `.env`
-  - ✅ `POLYMARKET_BUILDER_API_KEY=019f84e5-...3044` + `POLYMARKET_BUILDER_SECRET` + `POLYMARKET_BUILDER_PASSPHRASE`：2026/7/21 重建 key 后一次性保存，已填入 `.env`（L2 HMAC 三元组齐）
+  - ✅ Builder / Relayer 凭证已填入本地 `.env`（**勿写入本仓库文档**；泄露须立即在 Polymarket 控制台轮换）
+  - ✅ 所需键：`POLYMARKET_BUILDER_API_KEY` / `POLYMARKET_BUILDER_SECRET` / `POLYMARKET_BUILDER_PASSPHRASE` / `POLYMARKET_BUILDER_CODE` / `POLYMARKET_BUILDER_ADDRESS`，以及 Relayer 侧 `POLYMARKET_RELAYER_*`
 - [x] **ERC-7739-wrapped POLY_1271 签名实现** —— 移植至独立 crate `crates/clob-auth`（`sign_poly_1271_order` / `sign_poly_1271_order_with_signer`），对齐官方 `@polymarket/clob-client-v2@1.1.0`
   - [x] 外层 domain = CTF Exchange V2 domain（非独立 DepositWallet domain）；外层 struct = `TypedDataSign{Order contents, name="DepositWallet", version="1", chainId, verifyingContract=DW, salt=0}`
   - [x] wire 签名 = `innerSig(65) || appDomainSep(32) || contentsHash(32) || OrderTypeString(186) || u16be(len)` = 317 字节
