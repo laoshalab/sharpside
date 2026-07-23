@@ -1781,7 +1781,30 @@ pub async fn list_users_for_market(
     Ok(rows.into_iter().map(|(u,)| u).collect())
 }
 
-// ── watchlist ──
+/// P1-15：列出有某 Venue 在线预配凭证的所有用户（赎回候选扩展）。
+///
+/// 旧候选仅限 copy_execution 有记录的用户；官网手动买入无 copy_execution → 自动 worker 不扫到。
+/// 改为按凭证扩展候选：有 polymarket DepositWalletDelegated 凭证 + provision_live=true + 未撤销。
+/// worker 再用链上 balanceOf 过滤（已有逻辑），无仓位自动跳过。
+pub async fn list_users_with_live_credentials(
+    pool: &PgPool,
+    venue: &str,
+) -> Result<Vec<Uuid>, DbError> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT user_id
+        FROM account.user_venue_credentials
+        WHERE platform = $1
+          AND revoked_at IS NULL
+          AND kind = 'deposit_wallet_delegated'
+          AND (encrypted_blob->>'provision_live')::boolean = true
+        "#,
+    )
+    .bind(venue)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(u,)| u).collect())
+}
 // 用户观察名单（纯收藏，不进执行路径）。对应 Watchlist 功能规划。
 // 与 follow_relation 物理隔离：信号派生（list_follows_of_*）不查询本表。
 

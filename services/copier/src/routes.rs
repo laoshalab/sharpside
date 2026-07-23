@@ -51,6 +51,8 @@ pub fn router() -> Router<AppState> {
         .route("/me/wallet/redeem", post(redeem))
         .route("/me/wallet/redeemable", get(list_redeemable))
         .route("/me/wallet/redemptions", get(list_redemptions))
+        // P1-18：合并未决断市场的 YES+NO → pUSD（mergePositions）。对应 docs/CHANNEL_A_SIGNING.md §4.3。
+        .route("/me/wallet/merge", post(merge))
 }
 
 async fn readyz(state: AppState) -> Result<Json<serde_json::Value>, ApiError> {
@@ -1318,6 +1320,108 @@ async fn redeem(
         relayer_tx_id: row.relayer_tx_id,
         note: row.note,
     }))
+}
+
+/// P1-18：`POST /me/wallet/merge` body — 合并未决断市场的 YES+NO → pUSD。
+///
+/// body: `{ condition_id: "0x...", amount: 5.0 }`
+///
+/// mergePositions 把等量 YES+NO 按 1:1 换回 pUSD（collateral），用于未决断前主动平仓。
+/// 与 redeem 区别：redeem 是已结算后烧赢方 token；merge 是未结算时合并双边 token。
+/// 需同时持有 ≥amount 的 YES 和 NO（链上 balanceOf 校验）。
+#[derive(Debug, Deserialize)]
+pub struct MergeBody {
+    pub condition_id: String,
+    pub amount: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MergeResponse {
+    pub condition_id: String,
+    pub amount: f64,
+    pub tx_hash: Option<String>,
+    pub relayer_tx_id: Option<String>,
+}
+
+async fn merge(
+    state: AppState,
+    auth: AuthUser,
+    Json(body): Json<MergeBody>,
+) -> Result<Json<MergeResponse>, ApiError> {
+    let condition_id = body.condition_id.trim().to_lowercase();
+    let cond_hex = condition_id.trim_start_matches("0x");
+    if cond_hex.len() != 64 || !cond_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(
+            "condition_id 须为 0x 前缀的 32 字节 hex（bytes32）".into(),
+        ));
+    }
+    if body.amount <= 0.0 {
+        return Err(ApiError::BadRequest("amount 须为正数".into()));
+    }
+
+    // 1. 加载 polymarket 凭证（需 DepositWalletDelegated + 在线预配）。
+    let (cred, deposit_wallet_address) = load_polymarket_cred(&state, auth.user_id).await?;
+
+    // 2. 校验市场未决断（已决断应走 redeem，merge 会 revert）。
+    let market = raw::list_raw_markets(&state.db, "polymarket")
+        .await?
+        .into_iter()
+        .find(|m| m.venue_market_id.eq_ignore_ascii_case(&condition_id))
+        .ok_or_else(|| ApiError::NotFound("市场未在缓存中（condition_id 不匹配）".into()))?;
+    if market.closed {
+        return Err(ApiError::BadRequest(
+            "市场已结算，应走 /me/wallet/redeem（merge 仅用于未决断市场）".into(),
+        ));
+    }
+
+    // 3. 链上校验同时持有 ≥amount 的 YES 和 NO（merge 需等量双边 token）。
+    let venue_impl = state
+        .registry
+        .get(Platform::Polymarket)
+        .ok_or_else(|| ApiError::Internal("polymarket venue 未注册".into()))?
+        .clone();
+    let rpc_url = std::env::var("POLYGON_RPC_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::routes::POLYGON_RPC_DEFAULT_FALLBACK.to_string());
+    let pusd = crate::routes::parse_address_const(crate::routes::PUSD_CONST)
+        .map_err(ApiError::Internal)?;
+    let ctf =
+        crate::routes::parse_address_const(crate::routes::CTF_CONST).map_err(ApiError::Internal)?;
+    let dw: alloy_primitives::Address = deposit_wallet_address
+        .parse()
+        .map_err(|e| ApiError::BadRequest(format!("deposit_wallet_address 解析失败: {e}")))?;
+    let yes_pid =
+        sharpside_venues_polymarket::onchain::ctf_position_id(pusd, &condition_id, 2u64);
+    let no_pid =
+        sharpside_venues_polymarket::onchain::ctf_position_id(pusd, &condition_id, 1u64);
+    let yes_bal =
+        sharpside_venues_polymarket::onchain::ctf_balance_of(&rpc_url, ctf, dw, yes_pid)
+            .await
+            .map_err(ApiError::Internal)?;
+    let no_bal =
+        sharpside_venues_polymarket::onchain::ctf_balance_of(&rpc_url, ctf, dw, no_pid)
+            .await
+            .map_err(ApiError::Internal)?;
+    if yes_bal < body.amount || no_bal < body.amount {
+        return Err(ApiError::BadRequest(format!(
+            "合并需同时持有 ≥{amount} 的 YES 和 NO（当前 YES={yes_bal:.4} NO={no_bal:.4}）",
+            amount = body.amount
+        )));
+    }
+
+    // 4. 发起 merge（owner 签 WALLET batch → relayer 提交 CTF.mergePositions）。
+    let result = venue_impl.merge(&cred, &condition_id, body.amount).await;
+    match result {
+        Ok(r) => Ok(Json(MergeResponse {
+            condition_id: r.condition_id,
+            amount: r.amount,
+            tx_hash: r.tx_hash,
+            relayer_tx_id: r.relayer_tx_id,
+        })),
+        Err(e) => Err(ApiError::Internal(format!("merge 失败: {e}"))),
+    }
 }
 
 /// `GET /me/wallet/redeemable` — 列出用户在已结算市场的可赎回仓位。

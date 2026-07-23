@@ -108,16 +108,30 @@ async fn tick(
             }
         };
 
-        // 候选用户集：跟单过该市场的用户（链上 balanceOf 兜底确认）。
-        let users = match acct::list_users_for_market(&state.db, "polymarket", &m.venue_market_id)
+        // P1-15：候选用户集 = 跟单过该市场的用户 ∪ 有在线预配凭证的所有用户。
+        // 旧逻辑仅 copy_execution 用户；官网手动买入无 copy_execution → 自动 worker 不扫到。
+        // 凭证候选由 worker 的链上 balanceOf 过滤（无仓位自动跳过），不会误赎回。
+        let copy_users = match acct::list_users_for_market(&state.db, "polymarket", &m.venue_market_id)
             .await
         {
             Ok(u) => u,
             Err(e) => {
-                warn!(condition_id = %m.venue_market_id, error = %e, "查市场候选用户失败，跳过");
-                continue;
+                warn!(condition_id = %m.venue_market_id, error = %e, "查 copy_execution 候选用户失败，仅用凭证候选");
+                Vec::new()
             }
         };
+        let cred_users = match acct::list_users_with_live_credentials(&state.db, "polymarket").await {
+            Ok(u) => u,
+            Err(e) => {
+                warn!(error = %e, "查在线凭证候选用户失败，仅用 copy_execution 候选");
+                Vec::new()
+            }
+        };
+        // 并集去重。
+        let mut users: Vec<uuid::Uuid> = copy_users;
+        users.extend(cred_users);
+        users.sort_by_key(|u| *u);
+        users.dedup();
         if users.is_empty() {
             continue;
         }
