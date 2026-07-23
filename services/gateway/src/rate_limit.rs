@@ -4,12 +4,12 @@
 //! MVP 不依赖 Redis（多实例部署时换 Redis 后端，接口不变）。
 
 use crate::error::ApiError;
-use axum::extract::Request;
-use axum::http::HeaderMap;
+use axum::extract::{ConnectInfo, Request};
 use axum::middleware::Next;
 use axum::response::Response;
 use governor::DefaultKeyedRateLimiter;
 use governor::Quota;
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -44,26 +44,24 @@ fn make_limiter(rps: u32) -> Limiter {
     Limiter::keyed(quota)
 }
 
-/// 默认限流中间件：按客户端 IP（X-Forwarded-For 首段，缺失用 "unknown"）限流。
+/// 默认限流中间件：按客户端 IP 限流（受信代理才读 XFF / X-Real-IP）。
 pub async fn default_middleware(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     axum::Extension(limiters): axum::Extension<RateLimiters>,
     req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let ip = client_ip(req.headers());
+    let ip = sharpside_shared::client_ip::resolve_client_ip(
+        Some(addr.ip()),
+        req.headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok()),
+        req.headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok()),
+    );
     limiters.check_default(&ip)?;
     Ok(next.run(req).await)
-}
-
-/// 从 X-Forwarded-For 取首段 IP；缺失返回 "unknown"。
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("X-Forwarded-For")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[cfg(test)]

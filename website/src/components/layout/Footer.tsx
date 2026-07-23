@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useTranslations } from "next-intl";
+import { getAppHref } from "@/lib/appUrl";
 
-const APP_HREF = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:8080";
+const APP_HREF = getAppHref();
 
 export function Footer() {
   const t = useTranslations("footer");
@@ -37,12 +38,21 @@ export function Footer() {
           <p className="mt-2 max-w-xs text-xs leading-relaxed text-[rgb(var(--text-muted))]">
             {t("tagline")}
           </p>
-          <a
-            href={APP_HREF}
-            className="mt-4 inline-block text-sm font-medium text-[rgb(var(--accent))] hover:underline"
-          >
-            {t("launchApp")}
-          </a>
+          {APP_HREF ? (
+            <a
+              href={APP_HREF}
+              className="mt-4 inline-block text-sm font-medium text-[rgb(var(--accent))] hover:underline"
+            >
+              {t("launchApp")}
+            </a>
+          ) : (
+            <Link
+              href="/docs"
+              className="mt-4 inline-block text-sm font-medium text-[rgb(var(--accent))] hover:underline"
+            >
+              {t("docs")}
+            </Link>
+          )}
         </div>
         {columns.map((col) => (
           <div key={col.title}>

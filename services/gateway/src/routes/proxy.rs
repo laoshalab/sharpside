@@ -48,6 +48,7 @@ pub async fn proxy_to(
     let resp = req_builder.send().await?;
 
     let status = resp.status();
+    let resp_headers = resp.headers().clone();
     let resp_body = resp
         .bytes()
         .await
@@ -55,6 +56,20 @@ pub async fn proxy_to(
 
     let mut out = Response::new(Body::from(resp_body));
     *out.status_mut() = status;
+    // 安全修复 3.1：转发上游响应头（含 Set-Cookie：登录 cookie 须透传到浏览器）。
+    // 跳过 hop-by-hop 头（connection / content-length / transfer-encoding / keep-alive 等）。
+    for (name, value) in resp_headers.iter() {
+        if matches!(
+            name.as_str(),
+            "connection" | "content-length" | "transfer-encoding" | "keep-alive" | "te" | "trailer"
+                | "upgrade"
+        ) {
+            continue;
+        }
+        if let Ok(v) = axum::http::HeaderValue::from_bytes(value.as_bytes()) {
+            out.headers_mut().append(name, v);
+        }
+    }
     Ok(out)
 }
 

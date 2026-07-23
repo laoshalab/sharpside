@@ -70,7 +70,8 @@
       "getting-started": "はじめに",
       "architecture": "アーキテクチャ",
       "operations": "運用マニュアル"
-    }
+    },
+    "localeFallbackNotice": "この言語のドキュメントはまだありません。中国語の内容を表示しています。"
   },
   "pages": {
     "copy": {

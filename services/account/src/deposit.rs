@@ -27,6 +27,7 @@ use sharpside_venues_polymarket::{
 };
 use std::str::FromStr;
 use tracing::info;
+use zeroize::{Zeroize, Zeroizing};
 
 /// `POST /me/deposit-wallet/provision` 响应。
 #[derive(Debug, Serialize)]
@@ -51,10 +52,15 @@ pub async fn provision(
     let live = std::env::var("POLYMARKET_PROVISION_LIVE").ok().as_deref() == Some("1");
 
     // step 1: 生成 owner EOA 私钥（32 字节随机 → hex → PrivateKeySigner）。
-    let mut key_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key_bytes);
-    let owner_key_hex = format!("0x{}", alloy_primitives::hex::encode(key_bytes));
-    let owner_signer = PrivateKeySigner::from_str(&owner_key_hex)
+    // Zeroizing：加密入库后尽快清零明文 hex / 原始字节，降低进程内存残留窗口。
+    let mut key_bytes = Zeroizing::new([0u8; 32]);
+    rand::thread_rng().fill_bytes(key_bytes.as_mut());
+    let owner_key_hex = Zeroizing::new(format!(
+        "0x{}",
+        alloy_primitives::hex::encode(key_bytes.as_ref())
+    ));
+    key_bytes.zeroize();
+    let owner_signer = PrivateKeySigner::from_str(owner_key_hex.as_str())
         .map_err(|e| ApiError::Internal(format!("owner 私钥构造失败: {e}")))?;
     let owner_address = owner_signer.address();
 
@@ -62,8 +68,10 @@ pub async fn provision(
     // 用 AppState 注入的 KMS（main.rs 构造：LocalKms 生产 / DevKms dev）。copier 须注入同一 KMS 解密。
     let kms = &state.kms;
     let encrypted_owner_key = kms
-        .encrypt(&owner_key_hex)
+        .encrypt(owner_key_hex.as_str())
         .map_err(|e| ApiError::Internal(format!("KMS 加密 owner key 失败: {e}")))?;
+    // 明文 hex 已不再需要（后续 live 路径只用 owner_signer）。
+    drop(owner_key_hex);
 
     // step 3: CREATE2 派生 deposit wallet 地址（Solady ERC1967 beacon clone，从 beacon 地址算 init code hash；
     // 无需 env）。移植自 ~/文档/sharpside/crates/poly-relayer/src/derive.rs。
@@ -161,10 +169,23 @@ pub async fn provision(
 
         // step 8: CLOB update_balance_allowance(signature_type=3) 余额同步。
         // POLY_ADDRESS = owner EOA（L2 凭证所属），signature_type=3 → 服务端映射到 deposit wallet。
-        client
+        // 软失败：Relayer / L2 / approve 已完成即可交易与提现；余额同步在未充值或响应非 JSON
+        // 时常失败（live 测试亦作良性）。失败只标 skipped，仍以 provision_live=true 入库。
+        let mut live_skipped: Vec<String> = Vec::new();
+        match client
             .update_balance_allowance(owner_address, &l2.api_key, &l2.secret, &l2.passphrase)
             .await
-            .map_err(|e| ApiError::Internal(format!("update_balance_allowance 失败: {e}")))?;
+        {
+            Ok(_) => info!(owner = %owner_address, "CLOB balance-allowance 已同步"),
+            Err(e) => {
+                tracing::warn!(
+                    owner = %owner_address,
+                    error = %e,
+                    "update_balance_allowance 失败（未充值/响应体差异，继续入库）"
+                );
+                live_skipped.push("balance_sync".into());
+            }
+        }
 
         store_credential(
             &state,
@@ -176,7 +197,7 @@ pub async fn provision(
             &encrypted_l2_secret,
             &builder_code,
             true, // live
-            &[],  // no skipped
+            &live_skipped,
         )
         .await?;
     } else {
@@ -243,6 +264,13 @@ async fn store_credential(
     skipped: &[String],
 ) -> Result<(), ApiError> {
     let provision_steps = build_provision_steps(live, skipped);
+    // 安全修复 2.1：L2 passphrase 走 KMS 加密落库（与 secret 同口径），明文 l2_passphrase 置空。
+    // 读取侧（PolymarketVenue::resolve_l2_passphrase）优先解密 encrypted_l2_passphrase；
+    // 旧凭证无此字段 → 回退明文兼容。生产 KMS（LocalKms/AwsKms）下 DB dump 不含明文 passphrase。
+    let encrypted_l2_passphrase = state
+        .kms
+        .encrypt(&l2.passphrase)
+        .map_err(|e| ApiError::Internal(format!("KMS 加密 L2 passphrase 失败: {e}")))?;
     let blob = serde_json::json!({
         "kind": "deposit_wallet_delegated",
         "deposit_wallet_address": deposit_wallet_address.to_string(),
@@ -250,12 +278,14 @@ async fn store_credential(
         "encrypted_owner_key": encrypted_owner_key,
         "l2_api_key": l2.api_key,
         "encrypted_l2_secret": encrypted_l2_secret,
-        "l2_passphrase": l2.passphrase,
+        "encrypted_l2_passphrase": encrypted_l2_passphrase,
+        "l2_passphrase": "",
         "builder_code": builder_code,
         "provision_live": live,
         "provision_steps": provision_steps,
         "kms_key_id": state.kms.name(),
     });
+    acct::archive_credential_if_exists(&state.db, user_id, "polymarket").await?;
     acct::upsert_credential_with_proxy(
         &state.db,
         user_id,
@@ -269,32 +299,27 @@ async fn store_credential(
 
 /// 构造 8 步状态数组（字符串：done / skipped / pending / failed）。
 fn build_provision_steps(live: bool, skipped: &[String]) -> Vec<&'static str> {
-    if live {
-        return vec![
-            "done", "done", "done", "done", "done", "done", "done", "done",
-        ];
-    }
-    // 离线：①②③ done；④relayer ⑤l1 ⑥approve ⑦balance skipped；⑧入库 done
     let skip_set: std::collections::HashSet<&str> = skipped.iter().map(|s| s.as_str()).collect();
-    let step4 = if skip_set.contains("relayer_deploy") {
-        "skipped"
-    } else {
-        "done"
+    let step = |name: &str, default_done: bool| -> &'static str {
+        if skip_set.contains(name) {
+            "skipped"
+        } else if default_done {
+            "done"
+        } else {
+            "skipped"
+        }
     };
-    let step5 = if skip_set.contains("l1_derive_api_key") {
-        "skipped"
-    } else {
-        "done"
-    };
-    let step6 = if skip_set.contains("batch_approve") {
-        "skipped"
-    } else {
-        "done"
-    };
-    let step7 = if skip_set.contains("balance_sync") {
-        "skipped"
-    } else {
-        "done"
-    };
-    vec!["done", "done", "done", step4, step5, step6, step7, "done"]
+    // 在线默认全 done；允许个别软失败（如 balance_sync）标 skipped。
+    // 离线：①②③ done；④relayer ⑤l1 ⑥approve ⑦balance 默认 skipped；⑧入库 done。
+    let net_done = live;
+    vec![
+        "done",
+        "done",
+        "done",
+        step("relayer_deploy", net_done),
+        step("l1_derive_api_key", net_done),
+        step("batch_approve", net_done),
+        step("balance_sync", net_done),
+        "done",
+    ]
 }

@@ -401,9 +401,22 @@ fn handler_tree() -> UpdateHandler<teloxide::RequestError> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // 安全修复 4.2：生产或 LOG_FORMAT=json → JSON 结构化日志。
+    {
+        let filter = tracing_subscriber::EnvFilter::from_default_env();
+        let use_json = sharpside_shared::secrets::is_production()
+            || std::env::var("LOG_FORMAT").ok().as_deref() == Some("json");
+        if use_json {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_current_span(false)
+                .with_span_list(false)
+                .init();
+        } else {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
 
     let cfg = Config::from_env();
     if !cfg.is_configured() {

@@ -70,7 +70,8 @@
       "getting-started": "Primeros pasos",
       "architecture": "Arquitectura",
       "operations": "Operaciones"
-    }
+    },
+    "localeFallbackNotice": "Aún no hay documentación en este idioma; se muestra el contenido en chino."
   },
   "pages": {
     "copy": {

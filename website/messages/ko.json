@@ -70,7 +70,8 @@
       "getting-started": "시작하기",
       "architecture": "아키텍처",
       "operations": "운영 매뉴얼"
-    }
+    },
+    "localeFallbackNotice": "이 언어의 문서가 아직 없어 중국어 문서를 표시합니다."
   },
   "pages": {
     "copy": {

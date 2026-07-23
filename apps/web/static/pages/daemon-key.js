@@ -4,6 +4,7 @@ import { withShell } from '../components/nav.js';
 import { me, rotateDaemonKey } from '../lib/account.js';
 import { openOneTimeSecretModal } from '../components/one-time-secret.js';
 import { toast } from '../store/toast.js';
+import { remount } from '../router.js';
 import { t } from '../i18n/index.js';
 
 export async function daemonKeyPage() {
@@ -32,7 +33,7 @@ export async function daemonKeyPage() {
         const r = await rotateDaemonKey();
         const key = r.daemon_api_key || r.api_key || r.key || JSON.stringify(r);
         openOneTimeSecretModal({ title: t('daemonKey.oneTimeTitle'), value: key, warn: t('daemonKey.oneTimeWarn') });
-        daemonKeyPage().then(mount);
+        remount();
       } catch (e) { toast(e.message, 'error'); }
     } }),
   ]);
@@ -52,7 +53,7 @@ export async function daemonKeyPage() {
     el('code', { class: 'one-time-value', text: 'DAEMON_API_KEY=<key above>\nCOPIER_URL=https://api.sharpside.example/copier' }),
   ]));
   steps.appendChild(step(t('daemonKey.stepRun'), [
-    el('a', { href: '#/settings/daemon-key', text: t('daemonKey.docsLink') }),
+    el('a', { href: '/docs/guide/dual-channels', target: '_blank', rel: 'noopener', text: t('daemonKey.docsLink') }),
   ]));
   install.appendChild(steps);
   c.appendChild(install);
@@ -66,4 +67,3 @@ function step(title, body) {
   li.appendChild(el('div', { class: 'step-body' }, body));
   return li;
 }
-function mount(node) { const app = document.getElementById('app'); app.innerHTML = ''; app.appendChild(node); }

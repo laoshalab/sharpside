@@ -104,3 +104,26 @@ pub async fn bump_outbox_attempt(
     .await?;
     Ok(())
 }
+
+/// 未投递且未死信的 outbox 深度（Prometheus / readyz）。
+pub async fn count_pending_outbox(pool: &PgPool) -> Result<i64, DbError> {
+    let row: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*) FROM account.signal_outbox
+        WHERE delivered_at IS NULL AND deadlettered_at IS NULL
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+/// 死信条数。
+pub async fn count_deadletter_outbox(pool: &PgPool) -> Result<i64, DbError> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM account.signal_outbox WHERE deadlettered_at IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}

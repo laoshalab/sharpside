@@ -12,6 +12,7 @@ mod auth;
 mod config;
 mod error;
 mod exec;
+mod metrics;
 mod reclaim_worker;
 mod reconcile_worker;
 mod redeem_worker;
@@ -45,12 +46,43 @@ fn build_registry(kms: Option<Arc<dyn Kms>>) -> VenueRegistry {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // 安全修复 4.2：生产或 LOG_FORMAT=json → JSON 结构化日志。
+    {
+        let filter = EnvFilter::from_default_env();
+        let use_json = sharpside_shared::secrets::is_production()
+            || std::env::var("LOG_FORMAT").ok().as_deref() == Some("json");
+        if use_json {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_current_span(false)
+                .with_span_list(false)
+                .init();
+        } else {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
 
     let config = Config::from_env();
     tracing::info!(listen = %config.listen_addr, dry_run = config.dry_run, "copier 启动");
+
+    // 生产硬禁 DEV 覆盖路径：误设会让全员 Channel A 用同一私钥签名。
+    if sharpside_shared::secrets::is_production() {
+        if std::env::var("POLYMARKET_DEV_PRIVATE_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "生产环境禁止 POLYMARKET_DEV_PRIVATE_KEY：会覆盖 per-user KMS 密钥"
+            ));
+        }
+        if std::env::var("POLYMARKET_DEV_PLAINTEXT_HANDLE").ok().as_deref() == Some("1") {
+            return Err(anyhow::anyhow!(
+                "生产环境禁止 POLYMARKET_DEV_PLAINTEXT_HANDLE=1：密文当明文"
+            ));
+        }
+    }
 
     let db = sharpside_db::connect(&config.database_url, config.db_max_connections).await?;
     sharpside_db::migrate(&db).await?;
@@ -83,6 +115,26 @@ async fn main() -> anyhow::Result<()> {
         );
         None
     };
+
+    // 真钱门禁：COPIER_DRY_RUN=0 必须 production + LocalKms（禁止 DevKms / 无 KMS）。
+    if !config.dry_run {
+        if !sharpside_shared::secrets::is_production() {
+            return Err(anyhow::anyhow!(
+                "COPIER_DRY_RUN=0 须 APP_ENV=production（当前非生产，拒绝实盘）"
+            ));
+        }
+        if std::env::var("SHARPSIDE_KMS_MASTER_KEY_PATH").is_err() {
+            return Err(anyhow::anyhow!(
+                "COPIER_DRY_RUN=0 须 SHARPSIDE_KMS_MASTER_KEY_PATH（LocalKms 站内签）"
+            ));
+        }
+        if kms.is_none() {
+            return Err(anyhow::anyhow!(
+                "COPIER_DRY_RUN=0 须 LocalKms 已启用（构造失败或未注入）"
+            ));
+        }
+        tracing::warn!("COPIER_DRY_RUN=0：实盘执行已启用（production + LocalKms）");
+    }
 
     let registry = build_registry(kms);
     tracing::info!(venues = registry.platforms().len(), "venue 注册完成");

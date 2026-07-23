@@ -10,6 +10,10 @@ export function el(tag, props = {}, children = []) {
     else if (k === 'html') node.innerHTML = v;
     else if (k === 'onclick') node.onclick = v;
     else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (typeof v === 'boolean') {
+      if (v) node.setAttribute(k, '');
+      else node.removeAttribute(k);
+    }
     else if (v !== undefined && v !== null) node.setAttribute(k, v);
   }
   const kids = Array.isArray(children) ? children : [children];
@@ -53,7 +57,10 @@ export function periodTabs(periods = ['1d', '1w', '1m', '1y', 'ytd', 'all'], act
 }
 
 /// dataTable({ columns, rows, onRowClick }) — 通用表格。
-/// columns: [{ key, label, render?(row) }]
+/// columns: [{ key, label, render?(row), html? }]
+///   - 无 render：默认 textContent（安全修复 3.1，防 API 字段 XSS）
+///   - 有 render 且 html≠false：按 HTML 片段写入（调用方须对 API 数据 escHtml/escAttr）
+///   - 有 render 且 html===false：render 返回纯文本，走 textContent
 /// rows: 对象数组
 export function dataTable({ columns, rows = [], onRowClick }) {
   const table = el('table');
@@ -63,13 +70,37 @@ export function dataTable({ columns, rows = [], onRowClick }) {
   for (const row of rows) {
     const tr = el('tr', onRowClick ? { class: 'clickable', onclick: () => onRowClick(row) } : {});
     for (const c of columns) {
-      const val = c.render ? c.render(row) : row[c.key];
-      tr.appendChild(el('td', { html: val == null ? '<span class="neutral">—</span>' : String(val) }));
+      if (c.render) {
+        const val = c.render(row);
+        if (c.html === false) {
+          tr.appendChild(el('td', { text: val == null ? '—' : String(val) }));
+        } else {
+          tr.appendChild(el('td', { html: val == null ? '<span class="neutral">—</span>' : String(val) }));
+        }
+      } else {
+        const val = row[c.key];
+        tr.appendChild(el('td', { text: val == null ? '—' : String(val) }));
+      }
     }
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
   return table;
+}
+
+/// 转义 HTML 文本节点内容（API 数据进 html: 前必须调用）。
+export function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/// 转义 HTML 属性值。
+export function escAttr(s) {
+  return escHtml(s).replace(/`/g, '&#96;');
 }
 
 /// skeleton(n=3) — 骨架占位。

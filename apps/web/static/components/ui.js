@@ -4,6 +4,8 @@
 import { t } from '../i18n/index.js';
 
 /// el(tag, props, children) — 极简 DOM 构造器。
+/// 布尔属性（disabled/checked/…）：仅在 true 时写入；false 不得 setAttribute，
+/// 否则会出现 disabled="false" 仍被浏览器当作禁用（HTML 布尔属性看存在性）。
 export function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
@@ -12,6 +14,10 @@ export function el(tag, props = {}, children = []) {
     else if (k === 'html') node.innerHTML = v;
     else if (k === 'onclick') node.onclick = v;
     else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (typeof v === 'boolean') {
+      if (v) node.setAttribute(k, '');
+      else node.removeAttribute(k);
+    }
     else if (v !== undefined && v !== null) node.setAttribute(k, v);
   }
   const kids = Array.isArray(children) ? children : [children];

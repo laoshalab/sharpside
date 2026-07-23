@@ -45,7 +45,7 @@ export async function categoryMappingPage() {
           { key: 'platform', label: '平台' },
           { key: 'official_category', label: '官方 category' },
           { key: 'site_category', label: '站内分类' },
-          { key: 'display_name', label: '显示名', render: r => r.display_name || '—' },
+          { key: 'display_name', label: '显示名' },
           {
             key: 'actions',
             label: '操作',

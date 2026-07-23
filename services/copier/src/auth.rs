@@ -21,12 +21,31 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// 从 `Authorization: Bearer <token>` 取 token（cookie 缺失时的回退）。
+fn extract_bearer_token(parts: &Parts) -> Result<String, axum::response::Response> {
+    let header = parts
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| {
+            ApiError::Unauthorized("missing Authorization header or session cookie".into())
+                .into_response()
+        })?;
+    let token = header.strip_prefix("Bearer ").ok_or_else(|| {
+        ApiError::Unauthorized("expected Bearer scheme".into()).into_response()
+    })?;
+    Ok(token.trim().to_string())
+}
+
 /// JWT claims（与 account/gateway 共用 HS256）。
+///
+/// `jti` 必填：无 jti 的旧 token 解码失败 → 强制重新登录，保证可吊销（安全修复 1.2）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct Claims {
     pub sub: String,
     #[allow(dead_code)]
     pub exp: usize,
+    pub jti: String,
 }
 
 /// 已认证用户（JWT 模式）。用户态端点 `/me/*` 用。
@@ -43,20 +62,23 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let header = parts
+        // 安全修复 3.1：优先 HttpOnly cookie，回退 Bearer。
+        let token = if let Some(cookie) = parts
             .headers
-            .get(axum::http::header::AUTHORIZATION)
+            .get(axum::http::header::COOKIE)
             .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| {
-                ApiError::Unauthorized("missing Authorization header".into()).into_response()
-            })?;
-        let token = header.strip_prefix("Bearer ").ok_or_else(|| {
-            ApiError::Unauthorized("expected Bearer scheme".into()).into_response()
-        })?;
+        {
+            match sharpside_shared::session::extract_token_from_cookie_header(cookie) {
+                Some(t) => t,
+                None => extract_bearer_token(parts)?,
+            }
+        } else {
+            extract_bearer_token(parts)?
+        };
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.validate_exp = true;
         let claims = decode::<Claims>(
-            token,
+            &token,
             &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
             &validation,
         )
@@ -64,6 +86,15 @@ impl FromRequestParts<AppState> for AuthUser {
         let user_id = Uuid::parse_str(&claims.claims.sub).map_err(|e| {
             ApiError::Unauthorized(format!("invalid user id in jwt: {e}")).into_response()
         })?;
+        // 吊销检查（denylist）：与 account 同表同机制，多实例共享 PG。
+        if acct::is_jwt_revoked(&state.db, &claims.claims.jti)
+            .await
+            .map_err(|e| ApiError::Db(e).into_response())?
+        {
+            return Err(
+                ApiError::Unauthorized("token revoked".into()).into_response(),
+            );
+        }
         Ok(AuthUser { user_id })
     }
 }

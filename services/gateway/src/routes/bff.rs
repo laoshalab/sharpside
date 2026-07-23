@@ -1,9 +1,11 @@
 //! BFF 聚合端点。对应 `docs/ARCHITECTURE.md` §6.5（一次调用拼装：跨平台排行榜 + 身份绩效 + 跟随状态 + 可用执行 Venue）。
 //!
 //! 上游不可达时该字段返回空结构 / 默认值，不阻塞整体 BFF（降级）。
+//! 例外：account `/me` 返回 401 时整页 401（logout denylist / 会话失效须立即生效）。
+//! gateway AuthUser 已查 denylist；BFF 仍尊重上游 401 作双保险。
 
 use crate::auth::AuthUser;
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use axum::http::HeaderMap;
 use axum::Json;
@@ -34,46 +36,68 @@ pub struct Dashboard {
     pub jurisdiction: String,
 }
 
+/// 转发给上游的鉴权头（cookie 优先浏览器路径；Bearer 兼容程序化）。
+struct AuthForward {
+    authorization: Option<String>,
+    cookie: Option<String>,
+}
+
+impl AuthForward {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            authorization: headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            cookie: headers
+                .get(axum::http::header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+        }
+    }
+}
+
 /// `GET /me/dashboard` — BFF 一次拼装。需 JWT 鉴权。
 ///
 /// 并发拉取：venue-hub 排行榜 + follow 列表 + account `/me`（jurisdiction）+
 /// copier portfolio（kpi）+ copy-executions + copy-orders/recent。
+///
+/// account `/me` 若 401（含 denylist 吊销），整页返回 401。
+/// gateway 本地 AuthUser 亦查 denylist；此处作双保险（上游会话失效 / 凭证类 401）。
 pub async fn dashboard(
     state: AppState,
     user: AuthUser,
     headers: HeaderMap,
 ) -> ApiResult<Json<Dashboard>> {
     let cfg = &state.config;
-    let auth_header = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let auth = auth_header.as_deref();
+    let auth = AuthForward::from_headers(&headers);
 
     let (leaderboard, follows, me, portfolio, execs, orders, watchlist) = tokio::join!(
         fetch_or_empty(&state, &cfg.upstreams.venue_hub, "/traders?limit=20", None),
-        fetch_or_empty(&state, &cfg.upstreams.follow, "/follows", auth),
-        fetch_or_empty(&state, &cfg.upstreams.account, "/me", auth),
+        fetch_or_empty(&state, &cfg.upstreams.follow, "/follows", Some(&auth)),
+        fetch_me(&state, &cfg.upstreams.account, &auth),
         fetch_or_empty(
             &state,
             &cfg.upstreams.copier,
             "/me/portfolio?period=1m",
-            auth
+            Some(&auth)
         ),
         fetch_or_empty(
             &state,
             &cfg.upstreams.copier,
             "/me/copy-executions?limit=10000",
-            auth
+            Some(&auth)
         ),
         fetch_or_empty(
             &state,
             &cfg.upstreams.copier,
             "/me/copy-orders/recent?limit=10000",
-            auth
+            Some(&auth)
         ),
-        fetch_or_empty(&state, &cfg.upstreams.follow, "/me/watchlists", auth),
+        fetch_or_empty(&state, &cfg.upstreams.follow, "/me/watchlists", Some(&auth)),
     );
+
+    let me = me?;
 
     let jurisdiction = me
         .get("jurisdiction")
@@ -150,18 +174,45 @@ fn approx_pnl_from_execs(execs: &serde_json::Value) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn apply_auth(mut req: reqwest::RequestBuilder, auth: Option<&AuthForward>) -> reqwest::RequestBuilder {
+    let Some(a) = auth else {
+        return req;
+    };
+    if let Some(ref cookie) = a.cookie {
+        req = req.header(axum::http::header::COOKIE, cookie);
+    }
+    if let Some(ref authorization) = a.authorization {
+        req = req.header(axum::http::header::AUTHORIZATION, authorization);
+    }
+    req
+}
+
+/// 拉取 account `/me`：401 → 整页 Unauthorized；其他失败降级为空对象。
+async fn fetch_me(
+    state: &AppState,
+    base: &str,
+    auth: &AuthForward,
+) -> ApiResult<serde_json::Value> {
+    let url = format!("{base}/me");
+    let req = apply_auth(state.http.get(&url), Some(auth));
+    match req.send().await {
+        Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized(
+            "session revoked or invalid".into(),
+        )),
+        Ok(r) if r.status().is_success() => Ok(r.json().await.unwrap_or(serde_json::Value::Null)),
+        _ => Ok(serde_json::Value::Null),
+    }
+}
+
 /// 拉取上游，失败返回空 Value（降级，不阻塞整体 BFF）。
 async fn fetch_or_empty(
     state: &AppState,
     base: &str,
     path: &str,
-    auth: Option<&str>,
+    auth: Option<&AuthForward>,
 ) -> serde_json::Value {
     let url = format!("{base}{path}");
-    let mut req = state.http.get(&url);
-    if let Some(a) = auth {
-        req = req.header(axum::http::header::AUTHORIZATION, a);
-    }
+    let req = apply_auth(state.http.get(&url), auth);
     match req.send().await {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or(serde_json::Value::Null),
         _ => serde_json::Value::Null,

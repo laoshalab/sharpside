@@ -5,12 +5,46 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use axum::extract::{Path, Query};
 use axum::Json;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sharpside_db::queries::perf as perf_q;
 use sharpside_db::queries::raw;
 use sharpside_db::queries::traders as trader_q;
 use sharpside_venues_core::LeaderboardQuery;
 use std::time::Duration;
+
+/// 导入后立即拍一条 `/value` 快照，缩短非榜地址 official_pnl（value_delta）冷启动。
+async fn snap_portfolio_value(state: &AppState, platform: &str, address: &str) {
+    let Ok(platform_enum) = platform.parse::<sharpside_shared::Platform>() else {
+        return;
+    };
+    let Some(venue) = state.registry.get(platform_enum) else {
+        return;
+    };
+    match venue.portfolio_value(address).await {
+        Ok(v) => {
+            if let Err(e) =
+                perf_q::insert_value_snapshot(&state.db, platform, address, Utc::now(), v).await
+            {
+                tracing::warn!(
+                    platform = %platform,
+                    address = %address,
+                    error = %e,
+                    "import 写 /value 快照失败"
+                );
+            }
+        }
+        Err(sharpside_venues_core::VenueError::Unsupported(_)) => {}
+        Err(e) => {
+            tracing::warn!(
+                platform = %platform,
+                address = %address,
+                error = %e,
+                "import 拉 /value 失败"
+            );
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -281,11 +315,17 @@ pub struct ImportResponse {
 /// 绩效由 perf worker 异步重算（不在此同步阻塞）。
 pub async fn import_trader(
     state: AppState,
-    _auth: crate::state::AdminAuth,
+    auth: crate::auth::ImportCaller,
     Json(body): Json<ImportBody>,
 ) -> Result<Json<ImportResponse>, ApiError> {
     let platform = body.platform.clone();
     let address = body.address.clone();
+    tracing::info!(
+        caller = %auth.audit_label(),
+        %platform,
+        %address,
+        "import trader"
+    );
 
     let trader = trader_q::upsert_trader(
         &state.db,
@@ -315,6 +355,8 @@ pub async fn import_trader(
         }
         // 导入路径同样标记已回填，避免 backfill worker 重复拉取。
         let _ = trader_q::mark_trades_backfilled(&state.db, &platform, &address).await;
+        // 立即拍 /value，方便后续 official_pnl value_delta 兜底。
+        snap_portfolio_value(&state, &platform, &address).await;
     }
 
     Ok(Json(ImportResponse {
@@ -360,9 +402,14 @@ pub struct BatchImportResponse {
 /// 单条失败不影响其余条目（per-item error 收集）。对应 `docs/FLOWS.md` §1。
 pub async fn import_traders_batch(
     state: AppState,
-    _auth: crate::state::AdminAuth,
+    auth: crate::auth::ImportCaller,
     Json(body): Json<BatchImportBody>,
 ) -> Result<Json<BatchImportResponse>, ApiError> {
+    tracing::info!(
+        caller = %auth.audit_label(),
+        count = body.items.len(),
+        "import traders batch"
+    );
     if body.items.is_empty() {
         return Err(ApiError::BadRequest("items 不能为空".into()));
     }
@@ -420,6 +467,7 @@ pub async fn import_traders_batch(
                     }
                     // 无论回填成功与否都标记，避免 backfill worker 重复拉取。
                     let _ = trader_q::mark_trades_backfilled(&state.db, &platform, &address).await;
+                    snap_portfolio_value(&state, &platform, &address).await;
                 }
             }
             Err(e) => {
@@ -474,13 +522,16 @@ fn leaderboard_new_target() -> usize {
 ///
 /// - 已存在 `(platform, address)` 自动过滤（`ON CONFLICT DO NOTHING`），不重复写入。
 /// - `category` = None 时走 venue 默认（Polymarket=OVERALL）；Some 时按官方分类拉榜，
-///   用于发现某分类下活跃的交易者（架构 B 补充：seed 更多 trader，绩效仍由 perf worker 算）。
+///   用于发现某分类下活跃的交易者，并**对榜上每位交易者**种子该 `period`×`category`
+///   绩效行（否则前端点分类 + 严格匹配 → 0 人）。
+/// - `period`：sharpside 周期键（`1d`/`1w`/`1m`/`1y`/`ytd`/`all`），映射到 Venue API。
 /// - 分页推进直到新增满 `INGEST_LEADERBOARD_TARGET`（默认 500）或远端无更多结果。
 /// - 返回值为本轮**新插入**条数（跳过的不算）。
 pub(crate) async fn ingest_leaderboard(
     state: &AppState,
     platform: sharpside_shared::Platform,
     category: Option<&str>,
+    period: &str,
 ) -> Result<usize, ApiError> {
     let venue = state.registry.get(platform).ok_or_else(|| {
         ApiError::Unsupported(format!("venue {} not registered", platform.as_str()))
@@ -489,12 +540,13 @@ pub(crate) async fn ingest_leaderboard(
     let target = leaderboard_new_target();
     let mut inserted = 0usize;
     let mut skipped = 0usize;
+    let mut category_seeded = 0usize;
     let mut offset: u32 = 0;
 
     while inserted < target {
         let q = LeaderboardQuery {
             category: category.map(|s| s.to_string()),
-            time_period: "all".into(),
+            time_period: period.into(),
             order_by: "pnl".into(),
             limit: LEADERBOARD_PAGE_SIZE,
             offset,
@@ -505,6 +557,33 @@ pub(crate) async fn ingest_leaderboard(
         }
         let page_len = traders.len();
         for t in &traders {
+            // 分类榜：无论新老交易者都写/刷新该 period×category 绩效种子，
+            // 否则已存在地址全部 skipped 时分类筛选永远 0 人。
+            if let Some(cat) = category {
+                match perf_q::upsert_category_leaderboard_seed(
+                    &state.db,
+                    platform.as_str(),
+                    &t.venue_trader_id,
+                    period,
+                    cat,
+                    t.seed_pnl,
+                    t.seed_vol,
+                    "polymarket_leaderboard",
+                )
+                .await
+                {
+                    Ok(()) => category_seeded += 1,
+                    Err(e) => tracing::warn!(
+                        platform = platform.as_str(),
+                        address = %t.venue_trader_id,
+                        category = cat,
+                        period,
+                        error = %e,
+                        "seed 分类绩效失败"
+                    ),
+                }
+            }
+
             match trader_q::insert_trader_if_absent(
                 &state.db,
                 platform.as_str(),
@@ -520,7 +599,7 @@ pub(crate) async fn ingest_leaderboard(
             {
                 Ok(Some(_)) => {
                     // 临时展示层：首次入库时用 Polymarket 排行榜自带的 pnl/vol
-                    // 填一行 trader_performance(period='all')，backfill + perf 跑完前先有数。
+                    // 填一行 trader_performance(period='all', OVERALL)，backfill + perf 跑完前先有数。
                     // ON CONFLICT DO NOTHING 永不覆盖已有真实绩效。
                     if let Err(e) = perf_q::seed_trader_performance(
                         &state.db,
@@ -559,6 +638,10 @@ pub(crate) async fn ingest_leaderboard(
         if (page_len as u32) < LEADERBOARD_PAGE_SIZE {
             break;
         }
+        // 分类路径：种子写满 target 即可停（不必为「找新地址」空扫 2500）。
+        if category.is_some() && category_seeded >= target {
+            break;
+        }
         // 防护：极端情况下 offset 过大仍不停，最多扫 50 页（2500 条远端）
         if offset >= 2500 {
             break;
@@ -568,8 +651,10 @@ pub(crate) async fn ingest_leaderboard(
     tracing::info!(
         platform = platform.as_str(),
         category = category.unwrap_or("OVERALL"),
+        period,
         inserted,
         skipped,
+        category_seeded,
         target,
         "ingest leaderboard 去重完成"
     );
@@ -605,12 +690,93 @@ pub async fn get_equity_curve(
 
 /// `GET /traders/{platform}/{address}/positions` — 仓位时间线（含已平仓，前端过滤当前持仓）。
 /// 对应 `docs/FRONTEND_DESIGN.md` §6.1。
+///
+/// 附带市场元数据（title / slug / outcome）：优先 Data API 实时持仓，回退 `raw_markets` 缓存。
+#[derive(Debug, Serialize)]
+pub struct PositionOut {
+    #[serde(flatten)]
+    pub row: sharpside_db::PositionRow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+}
+
 pub async fn get_positions(
     state: AppState,
     Path((platform, address)): Path<(String, String)>,
-) -> Result<Json<Vec<sharpside_db::PositionRow>>, ApiError> {
+) -> Result<Json<Vec<PositionOut>>, ApiError> {
     let rows = perf_q::list_position_timeline(&state.db, &platform, &address).await?;
-    Ok(Json(rows))
+
+    // raw_markets 缓存：condition_id → (title, slug)
+    let condition_ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.condition_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let db_meta = raw::map_market_meta(&state.db, &platform, &condition_ids)
+        .await
+        .unwrap_or_default();
+
+    // 实时持仓元数据：token_id → (title, slug, event_slug, outcome)
+    let mut live_meta: std::collections::HashMap<
+        String,
+        (Option<String>, Option<String>, Option<String>, Option<String>),
+    > = std::collections::HashMap::new();
+    if let Ok(platform_enum) = platform.parse::<sharpside_shared::Platform>() {
+        if let Some(venue) = state.registry.get(platform_enum) {
+            match venue.positions(&address).await {
+                Ok(live) => {
+                    for p in live {
+                        live_meta.insert(
+                            p.token_id,
+                            (p.title, p.slug, p.event_slug, p.outcome),
+                        );
+                    }
+                }
+                Err(sharpside_venues_core::VenueError::Unsupported(_)) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        platform = %platform,
+                        address = %address,
+                        error = %e,
+                        "positions 实时元数据回源失败，回退 raw_markets"
+                    );
+                }
+            }
+        }
+    }
+
+    let out = rows
+        .into_iter()
+        .map(|row| {
+            let live = live_meta.get(&row.token_id);
+            let (db_title, db_slug) = row
+                .condition_id
+                .as_ref()
+                .and_then(|id| db_meta.get(id))
+                .cloned()
+                .map(|(t, s)| (Some(t), s))
+                .unwrap_or((None, None));
+            PositionOut {
+                market_title: live
+                    .and_then(|(t, _, _, _)| t.clone())
+                    .or(db_title),
+                market_slug: live
+                    .and_then(|(_, s, _, _)| s.clone())
+                    .or(db_slug),
+                event_slug: live.and_then(|(_, _, e, _)| e.clone()),
+                outcome: live.and_then(|(_, _, _, o)| o.clone()),
+                row,
+            }
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 /// `GET /traders/{platform}/{address}/trades?limit=&offset=` — 近期原始成交。

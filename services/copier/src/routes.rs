@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(crate::metrics::metrics))
         // daemon 通道 B
         .route("/me/copy-orders", get(list_copy_orders))
         .route("/me/copy-orders/:id/result", post(report_result))
@@ -147,14 +148,6 @@ async fn report_result(
     if order.user_id != auth.user_id {
         return Err(ApiError::Unauthorized("无权上报他人指令".into()));
     }
-    // P0-3 幂等：仅 pending/dispatched 可上报。已 filled/failed/skipped/cancelled 的指令
-    // 拒绝重复上报，避免重复 insert_copy_execution 与状态回退（多 daemon 实例 / 轮询重试场景）。
-    if !matches!(order.status.as_str(), "pending" | "dispatched") {
-        return Err(ApiError::BadRequest(format!(
-            "指令已终态（{}），拒绝重复上报",
-            order.status
-        )));
-    }
     // 回写 daemon 上报的执行目标（若提供且 DB 仍为 NULL）。
     if body.execute_market_id.is_some() || body.execute_token_id.is_some() {
         acct::set_copy_order_exec_targets(
@@ -167,6 +160,12 @@ async fn report_result(
     }
     match body.status.as_str() {
         "filled" => {
+            // 安全修复 1.4：CAS 抢占 pending/dispatched → filled。已终态 → None → 幂等返回 200，
+            // 不重复 insert copy_execution（堵死 daemon 重复上报 / 多实例竞争的重复入账）。
+            let claimed = acct::claim_copy_order_status(&state.db, id, "filled", None).await?;
+            if claimed.is_none() {
+                return Ok(Json(ResultAck { id, status: body.status }));
+            }
             let filled_size = body
                 .filled_size
                 .unwrap_or_else(|| order.size.try_into().unwrap_or(0.0f64));
@@ -182,7 +181,9 @@ async fn report_result(
                 .execute_token_id
                 .clone()
                 .unwrap_or_else(|| order.source_token_id.clone());
-            acct::insert_copy_execution(
+            // CAS 已置 filled → 记成交（ON CONFLICT DO NOTHING 兜底跨通道竞争）。
+            // 若成交行写入真 DB 故障（非冲突），回退 failed 交人工核对，避免 filled 但无 copy_execution 的账实不符。
+            if let Err(e) = acct::insert_copy_execution(
                 &state.db,
                 order.id,
                 order.user_id,
@@ -196,16 +197,28 @@ async fn report_result(
                 fee,
                 body.tx_hash.as_deref(),
             )
+            .await
+            {
+                acct::update_copy_order_status(
+                    &state.db,
+                    id,
+                    "failed",
+                    Some(&format!("insert_copy_execution 失败: {e}")),
+                )
+                .await
+                .ok();
+                return Err(e.into());
+            }
+        }
+        "failed" | "skipped" => {
+            // CAS 抢占：已终态 → 幂等返回 200（不重复改状态 / 不回退）。
+            let _ = acct::claim_copy_order_status(
+                &state.db,
+                id,
+                &body.status,
+                body.skip_reason.as_deref(),
+            )
             .await?;
-            acct::update_copy_order_status(&state.db, id, "filled", None).await?;
-        }
-        "failed" => {
-            acct::update_copy_order_status(&state.db, id, "failed", body.skip_reason.as_deref())
-                .await?;
-        }
-        "skipped" => {
-            acct::update_copy_order_status(&state.db, id, "skipped", body.skip_reason.as_deref())
-                .await?;
         }
         other => return Err(ApiError::BadRequest(format!("未知 status: {other}"))),
     }
@@ -1203,7 +1216,15 @@ async fn redeem(
     };
 
     // 3. 防重复：已有 pending/mined 赎回则拒绝。
-    if acct::redemption_exists_active(&state.db, auth.user_id, &condition_id, outcome).await? {
+    if acct::redemption_exists_active(
+        &state.db,
+        auth.user_id,
+        &condition_id,
+        outcome,
+        &deposit_wallet_address,
+    )
+    .await?
+    {
         return Err(ApiError::BadRequest(
             "该市场赢仓位已有进行中/完成的赎回".into(),
         ));
@@ -1252,6 +1273,7 @@ async fn redeem(
         &token_id_str,
         amount_dec,
         "manual",
+        &deposit_wallet_address,
     )
     .await
     .map_err(|e| match e {
@@ -1365,10 +1387,15 @@ async fn list_redeemable(
         if balance <= 0.0 {
             continue;
         }
-        let already_redeemed =
-            acct::redemption_exists_active(&state.db, auth.user_id, &m.venue_market_id, outcome)
-                .await
-                .unwrap_or(false);
+        let already_redeemed = acct::redemption_exists_active(
+            &state.db,
+            auth.user_id,
+            &m.venue_market_id,
+            outcome,
+            &deposit_wallet_address,
+        )
+        .await
+        .unwrap_or(false);
         items.push(RedeemableItem {
             condition_id: m.venue_market_id,
             title: m.title,

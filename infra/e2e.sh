@@ -51,6 +51,7 @@ CARGO_TARGET_DIR="$ROOT/target" cargo build --bins --offline 2>&1 | tail -1
 
 echo "=== 3. 启动服务 ==="
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info ACCOUNT_LISTEN_ADDR=127.0.0.1:8084 \
+  SHARPSIDE_KMS_DEV_PLAINTEXT=1 \
   "$ROOT/target/debug/sharpside-account" >/tmp/e2e_account.log 2>&1 & PIDS+=($!)
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info FOLLOW_LISTEN_ADDR=127.0.0.1:8082 \
   INTERNAL_SIGNAL_SECRET=e2e-internal-secret \
@@ -67,11 +68,19 @@ for ep in "$ACCT" "$FOLLOW" "$COPIER" "$ADMIN"; do
   wait_ready "$ep" && ok "$ep ready" || bad "$ep 未就绪"
 done
 
+# 安全修复 4.4 后 create_follow 校验 trader 存在性：随机地址须先 upsert 进 trader_hub.traders，
+# 否则被"交易者不存在"拒（curl -fs 静默失败 → 信号派生 matched_relations:0）。
+ensure_trader() {
+  docker exec sharpside-pg psql -U sharpside -d sharpside -tAc \
+    "INSERT INTO trader_hub.traders (platform, address, source) VALUES ('polymarket','"$1"','manual') ON CONFLICT DO NOTHING" >/dev/null
+}
+
 echo "=== 4. 通道 A 闭环 ==="
 # 邮箱注册已移除：用 TG 登录建用户 + JWT（account 默认 TG_BOT_SECRET=dev-tg-bot-secret）。
 TG_ADDR="0xe2e-tg-$(date +%s)"
 DAEMON_ADDR="0xe2e-dm-$(date +%s)"
 TG_ID=$(( (RANDOM << 15) + RANDOM + $(date +%s) % 100000 ))
+ensure_trader "$TG_ADDR"
 REG=$(curl -fs -X POST "$ACCT/auth/tg" -H "X-TG-Bot-Secret: dev-tg-bot-secret" -H 'Content-Type: application/json' \
   -d "{\"tg_id\":$TG_ID}")
 JWT=$(echo "$REG" | jq_get '["token"]')
@@ -100,10 +109,10 @@ EXA=$(docker exec sharpside-pg psql -U sharpside -d sharpside -tAc \
 echo "=== 5. 通道 B 闭环 ==="
 DAEMON_KEY=$(curl -fs -X POST "$ACCT/me/daemon-api-key" -H "Authorization: Bearer $JWT" | jq_get '["daemon_api_key"]')
 [ -n "$DAEMON_KEY" ] && ok "颁发 daemon_api_key" || bad "daemon_api_key 失败"
+ensure_trader "$DAEMON_ADDR"
 
 curl -fs -X POST "$FOLLOW/follows" -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
   -d "{\"follow_platform\":\"polymarket\",\"follow_address\":\"$DAEMON_ADDR\",\"execute_venue\":\"polymarket\",\"channel\":\"daemon\",\"config\":{\"sizing\":{\"mode\":\"fixed\",\"value\":{\"amount\":50}},\"execute_venue\":\"polymarket\",\"channel\":\"daemon\",\"same_venue_only\":false}}" >/dev/null && ok "创建跟随(daemon)"
-
 SIGB=$(curl -fs -X POST "$FOLLOW/internal/signals" -H 'Content-Type: application/json' \
   -H 'X-Internal-Secret: e2e-internal-secret' \
   -d "{\"platform\":\"polymarket\",\"trader_id\":\"$DAEMON_ADDR\",\"token_id\":\"tok-yes\",\"market_id\":\"cond-456\",\"side\":\"buy\",\"price\":0.4,\"size\":80,\"ts\":\"2026-07-21T09:46:00Z\"}")

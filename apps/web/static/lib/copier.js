@@ -1,5 +1,5 @@
 // api/copier.js · copier 服务端点封装。对应 docs/FRONTEND_DESIGN.md §6.11/§6.3。
-import { get, qs } from './client.js';
+import { get, post, qs } from './client.js';
 
 /// GET /copier/me/copy-executions?since=&limit=&offset=&follow_id=&venue=&status=
 /// 用户成交历史（服务端过滤）。对应 §6.11。

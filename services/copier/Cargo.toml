@@ -46,4 +46,5 @@ reqwest.workspace = true
 #   account.copy_order WHERE status='pending' AND channel='tg'；通道 B 由 daemon 拉取（HTTP）。
 # - dry_run 模式（默认 true）：不调 Venue::place_order，合成成交回报写 copy_execution，
 #   便于离线/无凭证环境跑通闭环。有凭证与网络环境后置 false。
-# - KMS：DevKms（env 明文，dev）由 copier 启动时注入；生产换真 AwsKms（见 sharpside-kms stub）。
+# - KMS：生产注入 LocalKms（SHARPSIDE_KMS_MASTER_KEY_PATH，站内解密签名）；dev 用 DevKms。
+#   AwsKms stub 为远期可选，非上线门禁。

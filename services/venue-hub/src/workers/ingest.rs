@@ -44,28 +44,33 @@ pub async fn run(state: AppState) {
                     continue;
                 }
                 // 1) leaderboard → upsert traders
-                //    Polymarket：按官方分类多次拉榜（架构 B 补充），seed 更多分类活跃交易者；
-                //    绩效仍由 perf worker 按 raw_markets.category 切片重算（架构 A）。
+                //    Polymarket：按官方分类 × 常用周期拉榜，种子分类绩效（否则点分类 → 0 人）；
+                //    绩效切片仍由 perf worker 在 raw_markets.category 就绪后覆盖。
                 //    其余 venue：仅 OVERALL（category=None）。
                 if platform == sharpside_shared::Platform::Polymarket {
+                    // 默认排行榜 period=1m；all 覆盖「全部」周期。1d/1w 由 official_pnl 补。
                     for cat in POLYMARKET_INGEST_CATEGORIES {
-                        match ingest_leaderboard(&state, platform, Some(cat)).await {
-                            Ok(n) => tracing::info!(
-                                platform = platform.as_str(),
-                                category = cat,
-                                traders = n,
-                                "ingest leaderboard"
-                            ),
-                            Err(e) => tracing::warn!(
-                                platform = platform.as_str(),
-                                category = cat,
-                                error = %e,
-                                "ingest leaderboard 失败"
-                            ),
+                        for period in ["1m", "all"] {
+                            match ingest_leaderboard(&state, platform, Some(cat), period).await {
+                                Ok(n) => tracing::info!(
+                                    platform = platform.as_str(),
+                                    category = cat,
+                                    period,
+                                    traders = n,
+                                    "ingest leaderboard"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    platform = platform.as_str(),
+                                    category = cat,
+                                    period,
+                                    error = %e,
+                                    "ingest leaderboard 失败"
+                                ),
+                            }
                         }
                     }
                 } else {
-                    match ingest_leaderboard(&state, platform, None).await {
+                    match ingest_leaderboard(&state, platform, None, "all").await {
                         Ok(n) => tracing::info!(
                             platform = platform.as_str(),
                             traders = n,
@@ -98,5 +103,6 @@ pub async fn run(state: AppState) {
                 }
             }
         }
+        state.worker_ticks.touch_ingest();
     }
 }

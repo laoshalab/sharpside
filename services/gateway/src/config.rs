@@ -10,6 +10,9 @@ use std::env;
 pub struct Config {
     /// 监听地址
     pub listen_addr: String,
+    /// Postgres（JWT denylist，与 account/follow/copier 同库；本服务不跑 migrate）
+    pub database_url: String,
+    pub db_max_connections: u32,
     /// JWT 签名密钥（HS256）
     pub jwt_secret: String,
     /// JWT 过期秒数
@@ -24,6 +27,8 @@ pub struct Config {
     /// 启用条件（任一）：debug 构建（`cfg!(debug_assertions)`）、
     /// 或显式 `DEV_ENDPOINTS_ENABLED=1`。
     pub dev_endpoints_enabled: bool,
+    /// 安全修复 3.1：会话 cookie 是否带 Secure。生产默认 true，本地 HTTP 须 false。
+    pub cookie_secure: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +50,13 @@ impl Config {
     pub fn from_env() -> Self {
         Self {
             listen_addr: env::var("GATEWAY_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into()),
+            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://sharpside:sharpside@127.0.0.1:5432/sharpside".into()
+            }),
+            db_max_connections: env::var("DB_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5),
             jwt_secret: sharpside_shared::secrets::assert_secret(
                 "JWT_SECRET",
                 &env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into()),
@@ -53,7 +65,7 @@ impl Config {
             jwt_ttl_seconds: env::var("JWT_TTL_SECONDS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(86_400),
+                .unwrap_or(1_800),
             upstreams: Upstreams {
                 venue_hub: env::var("VENUE_HUB_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:8081".into()),
@@ -80,6 +92,11 @@ impl Config {
                             .unwrap_or(false)
                 }
             },
+            cookie_secure: match env::var("COOKIE_SECURE").ok().as_deref() {
+                Some("1") | Some("true") => true,
+                Some("0") | Some("false") => false,
+                _ => sharpside_shared::secrets::is_production(),
+            },
         }
     }
 }
@@ -96,7 +113,7 @@ mod tests {
         let c = Config::from_env();
         assert_eq!(c.listen_addr, "0.0.0.0:8080");
         assert!(!c.jwt_secret.is_empty());
-        assert_eq!(c.jwt_ttl_seconds, 86_400);
+        assert_eq!(c.jwt_ttl_seconds, 1_800);
         assert!(c.upstreams.venue_hub.starts_with("http://"));
     }
 }

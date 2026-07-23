@@ -31,8 +31,36 @@ const SELECTOR_BALANCE_OF: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
 /// 用于读 CTF outcome token 余额（赎回前校验有无可赎回量）。
 const SELECTOR_ERC1155_BALANCE_OF: [u8; 4] = [0x00, 0xfd, 0xd5, 0x8e];
 
-/// `eth_call` 读余额的超时（秒）。短超时防阻塞 portfolio 页面。
-const RPC_TIMEOUT_SECS: u64 = 5;
+/// `eth_call` 读余额的超时（秒）。归档列表会并发打多次，留足余量。
+const RPC_TIMEOUT_SECS: u64 = 12;
+
+/// 主 URL 失败时轮询的公共 Polygon RPC（直连、多数地区可达）。
+const RPC_FALLBACKS: &[&str] = &[
+    "https://polygon-bor.publicnode.com",
+    "https://polygon-rpc.com",
+    "https://1rpc.io/matic",
+];
+
+/// 解析 RPC 候选列表：`rpc_url` → `POLYGON_RPC_URLS` 额外 → 内置 fallback（去重）。
+fn rpc_endpoints(primary: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<String>, raw: &str| {
+        let u = raw.trim().trim_end_matches('/');
+        if !u.is_empty() && !out.iter().any(|x| x == u) {
+            out.push(u.to_string());
+        }
+    };
+    push(&mut out, primary);
+    if let Ok(extra) = std::env::var("POLYGON_RPC_URLS") {
+        for part in extra.split(',') {
+            push(&mut out, part);
+        }
+    }
+    for f in RPC_FALLBACKS {
+        push(&mut out, f);
+    }
+    out
+}
 
 /// 链上 RPC 专用 HTTP 客户端：默认直连；仅当显式设置 `POLYGON_RPC_PROXY` 时走代理。
 fn build_rpc_http_client(timeout: std::time::Duration) -> Client {
@@ -51,6 +79,77 @@ fn build_rpc_http_client(timeout: std::time::Duration) -> Client {
     b.build().expect("reqwest rpc client build")
 }
 
+/// 对单个 endpoint 发一次 `eth_call`，成功返回 result hex 字符串。
+async fn eth_call_once(
+    http: &Client,
+    url: &str,
+    to: Address,
+    data: &str,
+) -> Result<String, String> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            { "to": to.to_string(), "data": data },
+            "latest"
+        ]
+    });
+    let resp = http
+        .post(url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "HTTP {status}: {}",
+            text.chars().take(160).collect::<String>()
+        ));
+    }
+    let parsed: RpcResp = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "响应解析失败: {e}（{}）",
+            text.chars().take(120).collect::<String>()
+        )
+    })?;
+    if let Some(err) = parsed.error {
+        return Err(format!(
+            "RPC error: {}",
+            err.message.unwrap_or_else(|| "unknown".into())
+        ));
+    }
+    parsed
+        .result
+        .ok_or_else(|| "响应缺 result".to_string())
+}
+
+/// `eth_call`：主 URL + 备用节点，每节点最多 3 次短重试。
+async fn eth_call_hex(rpc_url: &str, to: Address, data: &str) -> Result<String, String> {
+    let http = build_rpc_http_client(std::time::Duration::from_secs(RPC_TIMEOUT_SECS));
+    let endpoints = rpc_endpoints(rpc_url);
+    let mut last_err = String::from("无可用 RPC");
+    for url in &endpoints {
+        for attempt in 0u32..3 {
+            match eth_call_once(&http, url, to, data).await {
+                Ok(hex) => return Ok(hex),
+                Err(e) => {
+                    last_err = format!("{url} (try {}): {e}", attempt + 1);
+                    tracing::warn!(url = %url, attempt, error = %e, "Polygon eth_call 失败，将重试/换节点");
+                    if attempt + 1 < 3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(150 * (attempt + 1) as u64))
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+    Err(format!("链上余额暂不可查（RPC 繁忙或网络波动，请稍后刷新）: {last_err}"))
+}
+
 /// JSON-RPC 响应（只取 result 字段）。
 #[derive(Debug, Deserialize)]
 struct RpcResp {
@@ -64,6 +163,236 @@ struct RpcResp {
 struct RpcError {
     #[serde(default)]
     message: Option<String>,
+}
+
+/// `eth_getTransactionReceipt` / 含 object result 的通用包装。
+#[derive(Debug, Deserialize)]
+struct RpcRespVal<T> {
+    /// 可为 null（未上链）。不加 `default`，避免泛型 T: Default 约束。
+    result: Option<T>,
+    #[serde(default)]
+    error: Option<RpcError>,
+}
+
+/// 交易回执日志（精简字段，供 ERC-20 Transfer 匹配）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct TxLog {
+    /// 合约地址（代币）。
+    pub address: String,
+    pub topics: Vec<String>,
+    pub data: String,
+    #[serde(default, rename = "logIndex")]
+    pub log_index: Option<String>,
+    /// `eth_getLogs` 才有；receipt 内嵌 log 通常无此字段。
+    #[serde(default, rename = "transactionHash")]
+    pub transaction_hash: Option<String>,
+    #[serde(default, rename = "blockNumber")]
+    pub block_number: Option<String>,
+    #[serde(default)]
+    pub removed: Option<bool>,
+}
+
+/// `eth_getTransactionReceipt` 回执。
+#[derive(Debug, Clone, Deserialize)]
+pub struct TxReceipt {
+    /// `0x1` 成功 / `0x0` 失败。
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default, rename = "blockNumber")]
+    pub block_number: Option<String>,
+    #[serde(default)]
+    pub logs: Vec<TxLog>,
+}
+
+impl TxReceipt {
+    /// 交易是否成功（缺 status 的老链视为未知 → false）。
+    pub fn is_success(&self) -> bool {
+        matches!(
+            self.status.as_deref().map(|s| s.trim().to_lowercase()).as_deref(),
+            Some("0x1") | Some("1")
+        )
+    }
+
+    pub fn block_number_u64(&self) -> Option<u64> {
+        self.block_number.as_deref().and_then(parse_hex_u64)
+    }
+}
+
+impl TxLog {
+    pub fn log_index_i32(&self) -> Option<i32> {
+        let n = self.log_index.as_deref().and_then(parse_hex_u64)?;
+        i32::try_from(n).ok()
+    }
+
+    pub fn block_number_u64(&self) -> Option<u64> {
+        self.block_number.as_deref().and_then(parse_hex_u64)
+    }
+
+    pub fn tx_hash_normalized(&self) -> Option<String> {
+        let h = self.transaction_hash.as_deref()?.trim().to_lowercase();
+        if h.starts_with("0x") && h.len() == 66 {
+            Some(h)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_removed(&self) -> bool {
+        self.removed.unwrap_or(false)
+    }
+}
+
+/// 解析 `0x…` hex 无符号整数。
+pub fn parse_hex_u64(s: &str) -> Option<u64> {
+    let h = s.trim().trim_start_matches("0x");
+    if h.is_empty() {
+        return Some(0);
+    }
+    u64::from_str_radix(h, 16).ok()
+}
+
+/// 地址 → 32 字节 topic（左填零）。非法地址返回 None。
+pub fn address_to_topic(addr: &str) -> Option<String> {
+    let a = addr.trim().trim_start_matches("0x").to_lowercase();
+    if a.len() != 40 || !a.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("0x{:0>64}", a))
+}
+
+fn u64_to_hex_qty(n: u64) -> String {
+    format!("0x{n:x}")
+}
+
+async fn rpc_post_json_timeout<T: for<'de> Deserialize<'de>>(
+    rpc_url: &str,
+    method: &str,
+    params: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<Option<T>, String> {
+    let url = rpc_url.trim_end_matches('/');
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    let http = build_rpc_http_client(timeout);
+    let resp = http
+        .post(url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("RPC {method} 请求失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "RPC {method} HTTP {status}: {}",
+            text.chars().take(200).collect::<String>()
+        ));
+    }
+    let parsed: RpcRespVal<T> = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "RPC {method} 响应解析失败: {e}（原文: {}）",
+            text.chars().take(200).collect::<String>()
+        )
+    })?;
+    if let Some(err) = parsed.error {
+        return Err(format!(
+            "RPC {method} error: {}",
+            err.message.unwrap_or_else(|| "unknown".into())
+        ));
+    }
+    Ok(parsed.result)
+}
+
+async fn rpc_post_json<T: for<'de> Deserialize<'de>>(
+    rpc_url: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<Option<T>, String> {
+    rpc_post_json_timeout(
+        rpc_url,
+        method,
+        params,
+        std::time::Duration::from_secs(RPC_TIMEOUT_SECS),
+    )
+    .await
+}
+
+/// `eth_blockNumber` → 最新块高。
+pub async fn eth_block_number(rpc_url: &str) -> Result<u64, String> {
+    let hex: Option<String> = rpc_post_json(rpc_url, "eth_blockNumber", serde_json::json!([])).await?;
+    let hex = hex.ok_or_else(|| "eth_blockNumber 缺 result".to_string())?;
+    parse_hex_u64(&hex).ok_or_else(|| format!("非法 blockNumber: {hex}"))
+}
+
+/// `eth_getTransactionReceipt`。未上链时 result 为 null → `Ok(None)`。
+pub async fn eth_get_transaction_receipt(
+    rpc_url: &str,
+    tx_hash: &str,
+) -> Result<Option<TxReceipt>, String> {
+    rpc_post_json(
+        rpc_url,
+        "eth_getTransactionReceipt",
+        serde_json::json!([tx_hash]),
+    )
+    .await
+}
+
+/// `eth_getLogs`：按合约 + topics 拉日志（用于无 submit-tx 时认领入账）。
+///
+/// `topics` 中可用 `serde_json::Value::Null` 表示任意。
+pub async fn eth_get_logs(
+    rpc_url: &str,
+    address: &str,
+    topics: Vec<serde_json::Value>,
+    from_block: u64,
+    to_block: u64,
+) -> Result<Vec<TxLog>, String> {
+    if from_block > to_block {
+        return Ok(vec![]);
+    }
+    let filter = serde_json::json!({
+        "fromBlock": u64_to_hex_qty(from_block),
+        "toBlock": u64_to_hex_qty(to_block),
+        "address": address,
+        "topics": topics,
+    });
+    let logs: Option<Vec<TxLog>> = rpc_post_json_timeout(
+        rpc_url,
+        "eth_getLogs",
+        serde_json::json!([filter]),
+        std::time::Duration::from_secs(20),
+    )
+    .await?;
+    Ok(logs.unwrap_or_default())
+}
+
+/// 分块拉 logs，规避公共 RPC 块范围限制。
+pub async fn eth_get_logs_chunked(
+    rpc_url: &str,
+    address: &str,
+    topics: Vec<serde_json::Value>,
+    from_block: u64,
+    to_block: u64,
+    chunk_size: u64,
+) -> Result<Vec<TxLog>, String> {
+    let chunk = chunk_size.max(1);
+    let mut out = Vec::new();
+    let mut start = from_block;
+    while start <= to_block {
+        let end = start.saturating_add(chunk - 1).min(to_block);
+        let mut part = eth_get_logs(rpc_url, address, topics.clone(), start, end).await?;
+        out.append(&mut part);
+        if end == to_block {
+            break;
+        }
+        start = end + 1;
+    }
+    Ok(out)
 }
 
 /// 构造 `balanceOf(address)` calldata（4 + 32 字节），返回 `0x` 前缀 hex。
@@ -86,49 +415,8 @@ pub async fn pusd_balance_of(
     collateral: Address,
     deposit_wallet: Address,
 ) -> Result<f64, String> {
-    let url = rpc_url.trim_end_matches('/');
     let data = balance_of_calldata(deposit_wallet);
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "eth_call",
-        "params": [
-            { "to": collateral.to_string(), "data": data },
-            "latest"
-        ]
-    });
-    // 直连公共 RPC；不走 POLYMARKET_HTTP_PROXY（避免 Clash 未开时余额全挂）。
-    let http = build_rpc_http_client(std::time::Duration::from_secs(RPC_TIMEOUT_SECS));
-    let resp = http
-        .post(url)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("RPC eth_call 请求失败: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!(
-            "RPC eth_call HTTP {status}: {}",
-            text.chars().take(200).collect::<String>()
-        ));
-    }
-    let parsed: RpcResp = serde_json::from_str(&text).map_err(|e| {
-        format!(
-            "RPC 响应解析失败: {e}（原文: {}）",
-            text.chars().take(200).collect::<String>()
-        )
-    })?;
-    if let Some(err) = parsed.error {
-        return Err(format!(
-            "RPC error: {}",
-            err.message.unwrap_or_else(|| "unknown".into())
-        ));
-    }
-    let hex_result = parsed
-        .result
-        .ok_or_else(|| "RPC 响应缺 result".to_string())?;
+    let hex_result = eth_call_hex(rpc_url, collateral, &data).await?;
     let hex_str = hex_result.trim().trim_start_matches("0x");
     if hex_str.is_empty() {
         return Ok(0.0);
@@ -214,48 +502,8 @@ pub async fn ctf_balance_of(
     deposit_wallet: Address,
     position_id: U256,
 ) -> Result<f64, String> {
-    let url = rpc_url.trim_end_matches('/');
     let data = erc1155_balance_of_calldata(deposit_wallet, position_id);
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "eth_call",
-        "params": [
-            { "to": ctf.to_string(), "data": data },
-            "latest"
-        ]
-    });
-    let http = build_rpc_http_client(std::time::Duration::from_secs(RPC_TIMEOUT_SECS));
-    let resp = http
-        .post(url)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("RPC eth_call 请求失败: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!(
-            "RPC eth_call HTTP {status}: {}",
-            text.chars().take(200).collect::<String>()
-        ));
-    }
-    let parsed: RpcResp = serde_json::from_str(&text).map_err(|e| {
-        format!(
-            "RPC 响应解析失败: {e}（原文: {}）",
-            text.chars().take(200).collect::<String>()
-        )
-    })?;
-    if let Some(err) = parsed.error {
-        return Err(format!(
-            "RPC error: {}",
-            err.message.unwrap_or_else(|| "unknown".into())
-        ));
-    }
-    let hex_result = parsed
-        .result
-        .ok_or_else(|| "RPC 响应缺 result".to_string())?;
+    let hex_result = eth_call_hex(rpc_url, ctf, &data).await?;
     let hex_str = hex_result.trim().trim_start_matches("0x");
     if hex_str.is_empty() {
         return Ok(0.0);
@@ -271,7 +519,6 @@ pub async fn ctf_balance_of(
     let raw_u128: u128 = raw
         .try_into()
         .map_err(|_| "余额超出 uint128 范围".to_string())?;
-    // CTF token 1:1 collateral（pUSD，6 decimals）。
     Ok(raw_u128 as f64 / 1_000_000.0)
 }
 
@@ -378,5 +625,24 @@ mod tests {
         assert!(cd.starts_with("0x00fdd58e"));
         // 4 + 32 + 32 = 68 字节 = 136 hex + 0x
         assert_eq!(cd.len(), 2 + 136);
+    }
+
+    #[test]
+    fn parse_hex_u64_and_receipt_success() {
+        assert_eq!(parse_hex_u64("0x10"), Some(16));
+        assert_eq!(parse_hex_u64("0x0"), Some(0));
+        let ok = TxReceipt {
+            status: Some("0x1".into()),
+            block_number: Some("0xff".into()),
+            logs: vec![],
+        };
+        assert!(ok.is_success());
+        assert_eq!(ok.block_number_u64(), Some(255));
+        let bad = TxReceipt {
+            status: Some("0x0".into()),
+            block_number: None,
+            logs: vec![],
+        };
+        assert!(!bad.is_success());
     }
 }

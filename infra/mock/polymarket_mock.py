@@ -44,15 +44,15 @@ TRADERS = [
 MARKETS = [
     {"id": "m1", "conditionId": "0x6d081aa1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9",
      "question": "Will BTC close above $100k on Dec 31?", "slug": "btc-100k-dec31",
-     "tags": ["crypto", "bitcoin"], "endDate": "2026-12-31T23:59:00Z",
+     "category": "Crypto", "tags": ["crypto", "bitcoin"], "endDate": "2026-12-31T23:59:00Z",
      "outcomes": ["Yes", "No"]},
     {"id": "m2", "conditionId": "0x7e192bb2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
      "question": "Will the Fed cut rates in July?", "slug": "fed-cut-july",
-     "tags": ["economics", "fed"], "endDate": "2026-07-31T23:59:00Z",
+     "category": "Economics", "tags": ["economics", "fed"], "endDate": "2026-07-31T23:59:00Z",
      "outcomes": ["Yes", "No"]},
     {"id": "m3", "conditionId": "0x8f2a3cc3d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1",
      "question": "Will GDP growth exceed 2% in Q2?", "slug": "gdp-q2-2pct",
-     "tags": ["economics"], "endDate": "2026-09-30T23:59:00Z",
+     "category": "Economics", "tags": ["economics"], "endDate": "2026-09-30T23:59:00Z",
      "outcomes": ["Yes", "No"]},
 ]
 

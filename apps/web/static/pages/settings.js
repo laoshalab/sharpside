@@ -1,7 +1,10 @@
-// pages/settings.js · 设置基础。对应 docs/FRONTEND_DESIGN.md §6.12/§6.13/§6.5/§6.4。
+// pages/settings.js · 设置基础。对应 docs/FRONTEND_DESIGN.md §6.12/6.13/6.5/6.4。
 import { el, skeleton, emptyState } from '../components/ui.js';
 import { withShell } from '../components/nav.js';
-import { me, listCredentials, listWallets } from '../lib/account.js';
+import { me, listCredentials, listWallets, walletNonce, linkWallet, unlinkWallet } from '../lib/account.js';
+import { openWalletPicker } from '../lib/wallet-connect.js';
+import { connect, personalSign, buildSiwe } from '../lib/siwe.js';
+import { toast } from '../store/toast.js';
 import { t } from '../i18n/index.js';
 
 export async function settingsPage() {
@@ -13,7 +16,7 @@ export async function settingsPage() {
     el('a', { class: 'settings-hub-item', href: '#/settings/subscription', html: `<b>${t('settings.hubSubTitle')}</b><span>${t('settings.hubSubDesc')}</span>` }),
     el('a', { class: 'settings-hub-item', href: '#/settings/credentials', html: `<b>${t('settings.hubCredTitle')}</b><span>${t('settings.hubCredDesc')}</span>` }),
     el('a', { class: 'settings-hub-item', href: '#/settings/delegation', html: `<b>${t('settings.hubDelTitle')}</b><span>${t('settings.hubDelDesc')}</span>` }),
-    el('a', { class: 'settings-hub-item', href: '#/settings/daemon-key', html: `<b>Daemon Key</b><span>${t('settings.hubDaemonDesc')}</span>` }),
+    el('a', { class: 'settings-hub-item', href: '#/settings/daemon-key', html: `<b>${t('settings.hubDaemonTitle')}</b><span>${t('settings.hubDaemonDesc')}</span>` }),
   ]);
   c.appendChild(hub);
 
@@ -21,16 +24,104 @@ export async function settingsPage() {
   c.appendChild(el('h2', { text: t('settings.accountTitle') }));
   const acctCard = el('div', { class: 'card' }, [skeleton(2)]);
   c.appendChild(acctCard);
-  try {
-    const u = await me();
-    const wallets = await listWallets();
-    const primary = (wallets || []).find(w => w.is_primary) || (wallets || [])[0];
-    acctCard.innerHTML = '';
-    acctCard.appendChild(el('p', {}, [el('strong', { text: t('settings.connectedWallet') }), el('span', { text: primary?.address || '—' })]));
-    acctCard.appendChild(el('p', { class: 'muted', text: t('settings.userId', { id: u.id || '—' }) }));
-  } catch (e) {
-    acctCard.innerHTML = '';
-    acctCard.appendChild(el('p', { class: 'neg', text: t('settings.accountLoadError', { message: e.message }) }));
+
+  // 已绑定钱包
+  c.appendChild(el('h2', { text: t('settings.walletsTitle') }));
+  c.appendChild(el('p', { class: 'muted', text: t('settings.walletsIntro') }));
+  const walletCard = el('div', { class: 'card' }, [skeleton(2)]);
+  c.appendChild(walletCard);
+
+  let currentUser = null;
+
+  async function renderAccount() {
+    try {
+      const u = await me();
+      currentUser = u;
+      const wallets = await listWallets();
+      const primary = (wallets || []).find(w => w.is_primary) || (wallets || [])[0];
+      acctCard.innerHTML = '';
+      acctCard.appendChild(el('p', {}, [el('strong', { text: t('settings.connectedWallet') }), el('span', { text: primary?.address || '—' })]));
+      acctCard.appendChild(el('p', { class: 'muted', text: t('settings.userId', { id: u.id || '—' }) }));
+    } catch (e) {
+      acctCard.innerHTML = '';
+      acctCard.appendChild(el('p', { class: 'neg', text: t('settings.accountLoadError', { message: e.message }) }));
+    }
+  }
+
+  async function renderWallets() {
+    try {
+      const wallets = await listWallets();
+      walletCard.innerHTML = '';
+      if (!wallets || wallets.length === 0) {
+        walletCard.appendChild(emptyState({ text: t('settings.walletNoWallets') }));
+      } else {
+        const list = el('ul', { style: 'list-style:none;padding:0;display:flex;flex-direction:column;gap:8px' },
+          wallets.map(w => {
+            const head = el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, [
+              el('code', { style: 'word-break:break-all', text: w.address }),
+              w.is_primary ? el('span', { class: 'muted', text: `· ${t('settings.walletPrimary')}` }) : null,
+              w.label ? el('span', { class: 'muted', text: `· ${w.label}` }) : null,
+            ]);
+            if (!w.is_primary) {
+              const btn = el('button', { class: 'sm', text: t('settings.walletUnlinkBtn') });
+              btn.onclick = async () => {
+                if (!confirm(t('settings.walletUnlinkConfirm'))) return;
+                try {
+                  await unlinkWallet(w.address);
+                  toast(t('settings.walletUnlinkSuccess'), 'success');
+                  await renderWallets();
+                } catch (e) {
+                  toast(t('settings.walletUnlinkError', { message: e.message || '' }), 'error');
+                }
+              };
+              return el('li', {}, [head, btn]);
+            }
+            return el('li', {}, [head]);
+          }),
+        );
+        walletCard.appendChild(list);
+      }
+
+      const bindBtn = el('button', { class: 'primary', style: 'margin-top:10px', text: t('settings.walletBindBtn') });
+      bindBtn.onclick = async () => {
+        bindBtn.disabled = true;
+        bindBtn.textContent = t('settings.walletBinding');
+        try {
+          await bindNewWallet();
+          toast(t('settings.walletBindSuccess'), 'success');
+          await renderWallets();
+        } catch (e) {
+          toast(t('settings.walletBindError', { message: e.message || '' }), 'error');
+        } finally {
+          bindBtn.disabled = false;
+          bindBtn.textContent = t('settings.walletBindBtn');
+        }
+      };
+      walletCard.appendChild(bindBtn);
+    } catch (e) {
+      walletCard.innerHTML = '';
+      walletCard.appendChild(el('p', { class: 'neg', text: t('settings.walletBindError', { message: e.message }) }));
+    }
+  }
+
+  /// 绑定新钱包：选钱包 → 取 nonce → SIWE 签名 → POST /me/wallets。
+  /// 后端从验签消息权威导出地址，不信任客户端传入。
+  async function bindNewWallet() {
+    const wallet = await openWalletPicker();
+    if (!wallet) return;
+    const [address] = await connect(wallet);
+    const { nonce, domain, uri, chain_id, issued_at } = await walletNonce(address);
+    const message = buildSiwe({
+      domain,
+      address,
+      uri: uri || location.origin,
+      chainId: chain_id,
+      nonce,
+      issuedAt: issued_at,
+      expirationTime: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+    const signature = await personalSign(wallet, message, address);
+    await linkWallet({ message, signature });
   }
 
   // 订阅
@@ -77,10 +168,8 @@ export async function settingsPage() {
   keyCard.appendChild(el('p', { class: 'muted', text: t('settings.daemonDesc') }));
   keyCard.appendChild(el('a', { href: '#/settings/daemon-key', text: t('settings.daemonGoto') }));
 
-  return withShell(c);
-}
+  await renderAccount();
+  await renderWallets();
 
-function mount(node) {
-  const app = document.getElementById('app');
-  app.innerHTML = ''; app.appendChild(node);
+  return withShell(c);
 }

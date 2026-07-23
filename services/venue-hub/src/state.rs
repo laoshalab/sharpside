@@ -3,6 +3,7 @@
 //! `AppState` 持有 db 连接池、Venue 注册表与 HTTP 客户端，通过 `Router::with_state` 注入。
 
 use crate::config::Config;
+use crate::worker_ticks::WorkerTicks;
 use async_trait::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -20,6 +21,8 @@ pub struct AppState {
     /// 预留：跨服务回源 / 外部抓取用（当前 Venue adapter 自带 client）。
     #[allow(dead_code)]
     pub http: reqwest::Client,
+    /// 安全修复 4.3：worker 心跳，供 `/readyz` 判断停滞。
+    pub worker_ticks: Arc<WorkerTicks>,
 }
 
 impl AppState {
@@ -32,6 +35,7 @@ impl AppState {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client build"),
+            worker_ticks: WorkerTicks::new(),
         }
     }
 }
@@ -49,41 +53,4 @@ impl FromRequestParts<AppState> for AppState {
     }
 }
 
-/// 运维/admin 鉴权：`Authorization: Bearer <admin_token>`。保护写端点（如 `/traders/import*`）。
-///
-/// 常时比较，避免按字节短路带来的时序侧信道。
-#[derive(Debug, Clone)]
-pub struct AdminAuth {
-    #[allow(dead_code)]
-    pub token: String,
-}
-
-#[async_trait]
-impl FromRequestParts<AppState> for AdminAuth {
-    type Rejection = crate::error::ApiError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let header = parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| {
-                crate::error::ApiError::Unauthorized("missing Authorization header".into())
-            })?;
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| crate::error::ApiError::Unauthorized("expected Bearer scheme".into()))?;
-        if !sharpside_shared::secrets::constant_time_eq(
-            token.trim().as_bytes(),
-            state.config.admin_token.as_bytes(),
-        ) {
-            return Err(crate::error::ApiError::Forbidden("invalid admin token".into()));
-        }
-        Ok(AdminAuth {
-            token: token.trim().to_string(),
-        })
-    }
-}
+// 写端点鉴权见 `auth::ImportCaller`（Admin Bearer **或** 用户 JWT）。

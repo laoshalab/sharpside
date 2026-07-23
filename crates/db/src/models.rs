@@ -312,6 +312,29 @@ pub struct UserVenueCredential {
     pub proxy_address: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// 安全修复 2.2：凭证撤销时间。`None` = 活跃；`Some` = 已撤销（copier 不再为其下单，不可逆）。
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// 撤销操作者（= 用户自身 user_id）。`None` = 未撤销或迁移前旧行。
+    pub revoked_by: Option<Uuid>,
+}
+
+/// `account.credential_archives` 行（re-provision 前旧凭证快照）。
+///
+/// `encrypted_blob` 含旧 owner 密文，**不**序列化给前端；对外 API 只暴露地址等非密字段。
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct CredentialArchive {
+    pub id: i64,
+    pub user_id: Uuid,
+    pub platform: String,
+    pub kind: String,
+    #[serde(skip_serializing)]
+    pub encrypted_blob: serde_json::Value,
+    pub proxy_address: Option<String>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_by: Option<Uuid>,
+    pub original_created_at: Option<DateTime<Utc>>,
+    pub original_updated_at: Option<DateTime<Utc>>,
+    pub archived_at: DateTime<Utc>,
 }
 
 /// 排行榜行：`traders` LEFT JOIN `trader_performance`(指定 period) LEFT JOIN `trader_tag`。
@@ -448,8 +471,55 @@ pub struct Redemption {
     pub relayer_tx_id: Option<String>,
     /// pending / mined / failed。
     pub status: String,
-    /// auto = worker 触发；manual = 用户点【赎回】按钮触发。
+    /// auto = worker 触发；manual = 用户点【赎回】；archive_manual = 归档旧 DW。
     pub source: String,
     pub note: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// 赎回发生的 Deposit Wallet（空字符串 = 迁移前旧行 / 未区分）。
+    #[serde(default)]
+    pub deposit_wallet: String,
+}
+
+/// `account.billing_invoices` 行。Pro+ USDC 订阅应付单（migration 0040）。
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct BillingInvoice {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub plan: String,
+    pub period_days: i32,
+    /// 人类单位（如 30.00 USDC）。
+    pub amount_usdc: Decimal,
+    /// 链上整数（USDC 6 位）。
+    pub amount_raw: Decimal,
+    pub chain_id: i32,
+    /// 小写 0x；native USDC，≠ Polymarket pUSD。
+    pub token_address: String,
+    /// 小写 0x 平台收款地址。
+    pub treasury_address: String,
+    /// pending / paid / expired / cancelled。
+    pub status: String,
+    pub expires_at: DateTime<Utc>,
+    pub paid_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `account.billing_payments` 行。链上入账审计与幂等键（migration 0040）。
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct BillingPayment {
+    pub id: Uuid,
+    pub invoice_id: Uuid,
+    pub user_id: Uuid,
+    pub chain_id: i32,
+    /// 小写 0x + 64 hex。
+    pub tx_hash: String,
+    pub log_index: Option<i32>,
+    pub from_address: Option<String>,
+    pub to_address: Option<String>,
+    pub amount_raw: Option<Decimal>,
+    pub block_number: Option<i64>,
+    /// submitted / confirmed / rejected。
+    pub status: String,
+    pub note: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub confirmed_at: Option<DateTime<Utc>>,
 }

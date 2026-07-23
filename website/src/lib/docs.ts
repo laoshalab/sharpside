@@ -80,6 +80,13 @@ function getLocaleDir(locale: string): string {
   return path.join(contentDir, "en");
 }
 
+/** True when docs content falls back to another locale (usually zh). */
+export function isDocsLocaleFallback(locale: string): boolean {
+  const preferred = path.join(contentDir, locale);
+  if (fs.existsSync(preferred)) return false;
+  return fs.existsSync(path.join(contentDir, "zh")) || fs.existsSync(path.join(contentDir, "en"));
+}
+
 function findMdxFiles(dir: string, base: string = dir): string[] {
   if (!fs.existsSync(dir)) return [];
   const entries = fs.readdirSync(dir, { withFileTypes: true });

@@ -1,5 +1,5 @@
 // pages/shadow-health.js · 影子数据健康。对应 docs/SHADOW_MODE.md §8。
-import { el, dataTable, skeleton, emptyState, statCard, fmtPct, fmtNum } from '../components/ui.js';
+import { el, dataTable, skeleton, emptyState, statCard, fmtPct, fmtNum, escHtml } from '../components/ui.js';
 import { nav } from '../components/nav.js';
 import { shadowSummary, shadowHeatmap, shadowTopDiffs, shadowAudits } from '../api/admin.js';
 
@@ -7,7 +7,7 @@ const HOURS_OPTS = [6, 24, 72, 168];
 const STATUS_OPTS = ['', 'ok', 'warn', 'alert'];
 
 export async function shadowHealthPage() {
-  const state = { hours: 24, status: 'alert', platform: '', address: '', metric: '' };
+  const state = { hours: 24, topStatus: 'alert', auditStatus: '', platform: '', address: '', metric: '' };
   const root = el('div');
   root.appendChild(nav());
   const c = el('div', { class: 'container' });
@@ -34,8 +34,8 @@ export async function shadowHealthPage() {
 
   c.appendChild(el('h2', { text: 'Top 偏离' }));
   const topBar = el('div', { class: 'row' });
-  topBar.appendChild(field('status', selectEl(state.status, STATUS_OPTS, v => {
-    state.status = v;
+  topBar.appendChild(field('status', selectEl(state.topStatus, STATUS_OPTS, v => {
+    state.topStatus = v;
     loadTop();
   }, s => s || '全部（按 |diff_pct|）')));
   c.appendChild(topBar);
@@ -44,6 +44,9 @@ export async function shadowHealthPage() {
 
   c.appendChild(el('h2', { text: '审计明细' }));
   const filt = el('div', { class: 'row' });
+  filt.appendChild(field('status', selectEl(state.auditStatus, STATUS_OPTS, v => {
+    state.auditStatus = v;
+  }, s => s || '全部')));
   filt.appendChild(field('platform', el('input', {
     value: '',
     placeholder: 'polymarket',
@@ -130,7 +133,7 @@ export async function shadowHealthPage() {
     try {
       const rows = await shadowTopDiffs({
         hours: state.hours,
-        status: state.status || undefined,
+        status: state.topStatus || undefined,
         limit: 20,
       });
       topCard.innerHTML = '';
@@ -154,7 +157,7 @@ export async function shadowHealthPage() {
         platform: state.platform || undefined,
         address: state.address || undefined,
         metric: state.metric || undefined,
-        status: state.status || undefined,
+        status: state.auditStatus || undefined,
         limit: 100,
       });
       auditCard.innerHTML = '';
@@ -179,23 +182,24 @@ function auditTable(rows) {
       {
         key: 'status',
         label: 'status',
-        render: r => `<span class="${r.status === 'alert' ? 'neg' : r.status === 'warn' ? 'neutral' : 'pos'}">${r.status}</span>`,
+        render: r => `<span class="${r.status === 'alert' ? 'neg' : r.status === 'warn' ? 'neutral' : 'pos'}">${escHtml(r.status)}</span>`,
       },
       { key: 'platform', label: '平台' },
       {
         key: 'address',
         label: '地址',
-        render: r => `<code>${String(r.address).slice(0, 10)}…</code>`,
+        render: r => `<code>${escHtml(String(r.address).slice(0, 10))}…</code>`,
       },
       { key: 'metric_name', label: 'metric' },
       { key: 'period', label: 'period' },
-      { key: 'self_value', label: 'self', render: r => fmtNum(num(r.self_value), 4) },
-      { key: 'third_party_value', label: '3rd', render: r => fmtNum(num(r.third_party_value), 4) },
-      { key: 'diff_pct', label: 'diff%', render: r => r.diff_pct == null ? '—' : fmtNum(num(r.diff_pct), 2) + '%' },
+      { key: 'self_value', label: 'self', render: r => fmtNum(num(r.self_value), 4), html: false },
+      { key: 'third_party_value', label: '3rd', render: r => fmtNum(num(r.third_party_value), 4), html: false },
+      { key: 'diff_pct', label: 'diff%', render: r => r.diff_pct == null ? '—' : fmtNum(num(r.diff_pct), 2) + '%', html: false },
       {
         key: 'audited_at',
         label: '时间',
         render: r => r.audited_at ? new Date(r.audited_at).toLocaleString() : '—',
+        html: false,
       },
     ],
     rows,

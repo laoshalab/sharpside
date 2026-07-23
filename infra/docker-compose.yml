@@ -204,6 +204,7 @@ services:
     environment:
       ACCOUNT_LISTEN_ADDR: "0.0.0.0:8084"
       DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
+      ACCOUNT_INTERNAL_SECRET: "${ACCOUNT_INTERNAL_SECRET:-e2e-account-internal-secret}"
     ports:
       - "8084:8084"
     depends_on:
@@ -233,6 +234,7 @@ services:
     container_name: sharpside-gateway
     environment:
       GATEWAY_LISTEN_ADDR: "0.0.0.0:8085"
+      DATABASE_URL: "postgres://sharpside:sharpside_dev@postgres:5432/sharpside"
       VENUE_HUB_URL: "http://venue-hub:8081"
       FOLLOW_URL: "http://follow:8082"
       COPIER_URL: "http://copier:8083"
@@ -240,6 +242,8 @@ services:
     ports:
       - "8085:8085"
     depends_on:
+      postgres:
+        condition: service_healthy
       venue-hub:
         condition: service_healthy
       follow:

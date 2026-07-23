@@ -1,5 +1,5 @@
 // pages/hot-wallets.js · 热钥管理。对应 docs/FRONTEND_DESIGN.md §7.4。
-import { el, dataTable, skeleton, emptyState } from '../components/ui.js';
+import { el, dataTable, skeleton, emptyState, escHtml } from '../components/ui.js';
 import { nav } from '../components/nav.js';
 import { listHotWallets, upsertHotWallet, deleteHotWallet } from '../api/admin.js';
 import { toast } from '../store/toast.js';
@@ -34,10 +34,10 @@ export async function hotWalletsPage() {
       }
       card.appendChild(dataTable({
         columns: [
-          { key: 'address', label: '地址', render: r => `<code>${String(r.address).slice(0, 10)}…${String(r.address).slice(-4)}</code>` },
+          { key: 'address', label: '地址', render: r => `<code>${escHtml(String(r.address).slice(0, 10))}…${escHtml(String(r.address).slice(-4))}</code>` },
           { key: 'priority', label: '优先级' },
           { key: 'scan_interval_secs', label: '抓取频率(秒)' },
-          { key: 'enabled', label: '启用', render: r => r.enabled ? '✅' : '☐' },
+          { key: 'enabled', label: '启用', render: r => r.enabled ? '✅' : '☐', html: false },
           { key: 'added_by', label: '添加人' },
           { key: 'actions', label: '操作', render: r => `<button class="sm" data-act="edit">编辑</button> <button class="sm danger" data-act="del">删除</button>` },
         ],

@@ -3,13 +3,14 @@
 # 基镜像 debian:12-slim 已缓存，glibc 2.36 满足二进制 GLIBC_2.34 要求。
 ARG RUNTIME_IMAGE=debian:12-slim
 FROM ${RUNTIME_IMAGE} AS runtime
-ARG SERVICE=sharpside-gateway
+# ARG SERVICE 须在 apt 层之后声明，否则换 SERVICE 会打穿 apt 缓存。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 65532 nonroot \
  && useradd --system --uid 65532 --gid nonroot --home-dir /app --shell /usr/sbin/nologin nonroot
 WORKDIR /app
+ARG SERVICE=sharpside-gateway
 # 宿主机预编译二进制（已 staged 到 .prebuilt-bin/，因 .dockerignore 排除 target/）
 COPY .prebuilt-bin/${SERVICE} /app/bin/sharpside
 # web/admin 静态资源（相对 CWD apps/{web,admin}/static，见 apps/web/src/main.rs）

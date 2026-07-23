@@ -44,6 +44,13 @@ pub struct Config {
     pub reconcile_timeout_secs: u64,
     /// 成交对账 worker 是否启用。默认 true（Channel A 真钱路径必需，否则 submitted 单永久卡死）。
     pub reconcile_worker_enabled: bool,
+    /// 跟单下单类型（默认 FAK：立即成交能成交的部分，剩余取消）。
+    /// GTC 会挂单等成交，跟单场景常因行情已走而不成交、120s 超时撤单。
+    /// FOK 要求整单立即成交，深度不足时整单取消；FAK 允许部分成交，跟单更稳。
+    pub copy_order_type: sharpside_venues_core::OrderType,
+    /// 激进定价：买取 best_ask、卖取 best_bid（吃对手盘立即成交），并以信号价 ± max_slippage 钳制。
+    /// 关闭则按信号价挂/吃单（FAK 仍 IOC，但不主动跨越盘口）。
+    pub aggressive_pricing: bool,
     /// JWT 签名密钥（与 account/gateway 共用，校验用户态端点的 Bearer token）。
     pub jwt_secret: String,
 }
@@ -123,6 +130,8 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(120),
             reconcile_worker_enabled: parse_bool("RECONCILE_WORKER_ENABLED", true),
+            copy_order_type: parse_order_type("COPIER_ORDER_TYPE", sharpside_venues_core::OrderType::Fak),
+            aggressive_pricing: parse_bool("COPIER_AGGRESSIVE_PRICING", true),
             jwt_secret: sharpside_shared::secrets::assert_secret(
                 "JWT_SECRET",
                 &env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into()),
@@ -136,6 +145,20 @@ fn parse_bool(key: &str, default: bool) -> bool {
     match env::var(key).ok().as_deref() {
         Some("true") | Some("1") | Some("yes") => true,
         Some("false") | Some("0") | Some("no") => false,
+        _ => default,
+    }
+}
+
+fn parse_order_type(
+    key: &str,
+    default: sharpside_venues_core::OrderType,
+) -> sharpside_venues_core::OrderType {
+    use sharpside_venues_core::OrderType;
+    match env::var(key).ok().as_deref() {
+        Some(s) if s.eq_ignore_ascii_case("GTC") => OrderType::Gtc,
+        Some(s) if s.eq_ignore_ascii_case("GTD") => OrderType::Gtd,
+        Some(s) if s.eq_ignore_ascii_case("FOK") => OrderType::Fok,
+        Some(s) if s.eq_ignore_ascii_case("FAK") => OrderType::Fak,
         _ => default,
     }
 }

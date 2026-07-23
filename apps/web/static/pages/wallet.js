@@ -7,9 +7,10 @@
 import { el, skeleton, emptyState, dataTable, fmtUSD } from '../components/ui.js';
 import { withShell } from '../components/nav.js';
 import { getWallet, withdraw, listWithdrawals, listRedeemable, redeem, listRedemptions } from '../lib/copier.js';
-import { listWallets } from '../lib/account.js';
+import { listWallets, listDelegationArchives } from '../lib/account.js';
 import { toast } from '../store/toast.js';
 import { t } from '../i18n/index.js';
+import { copyText } from '../lib/clipboard.js';
 
 // pUSD（collateral）合约地址，Polygon 主网。与 wallet_batch::contracts::COLLATERAL / PUSD_CONST 一致。
 const PUSD_CONTRACT = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
@@ -84,6 +85,39 @@ export async function walletPage() {
         rechargeCard.appendChild(el('p', { class: 'muted', text: t('wallet.noDepositWallet') }));
       }
 
+      // 历史 Deposit Wallet（有余额时醒目）
+      rechargeCard.appendChild(el('h3', { style: 'margin-top:16px', text: t('wallet.archivesTitle') }));
+      rechargeCard.appendChild(el('p', { class: 'muted', text: t('wallet.archivesIntro') }));
+      const archBox = el('div', { style: 'margin-top:6px' }, [skeleton(1)]);
+      rechargeCard.appendChild(archBox);
+      listDelegationArchives().then((rows) => {
+        archBox.innerHTML = '';
+        const funded = (rows || []).filter((a) => a.onchain_balance != null && Number(a.onchain_balance) > 0);
+        if (!funded.length) {
+          archBox.appendChild(el('p', { class: 'muted', text: '—' }));
+          return;
+        }
+        for (const a of funded) {
+          const dw = a.deposit_wallet_address || '';
+          archBox.appendChild(el('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0' }, [
+            copyField(dw, t('common.copy')),
+            el('span', { class: 'neg', text: fmtUSD(a.onchain_balance) + ' pUSD' }),
+          ]));
+        }
+        archBox.appendChild(el('a', {
+          href: '#/settings/delegation',
+          class: 'primary',
+          style: 'display:inline-block;margin-top:6px',
+          text: t('wallet.gotoDelegationArchives'),
+        }));
+      }).catch(() => {
+        archBox.innerHTML = '';
+        archBox.appendChild(el('a', {
+          href: '#/settings/delegation',
+          text: t('wallet.gotoDelegationArchives'),
+        }));
+      });
+
       // pUSD 合约地址（Polygon）：外部钱包添加自定义代币 / 核对转账用
       rechargeCard.appendChild(el('h3', { style: 'margin-top:16px', text: t('wallet.contractTitle') }));
       rechargeCard.appendChild(copyField(PUSD_CONTRACT, t('wallet.copyContract')));
@@ -102,6 +136,8 @@ export async function walletPage() {
     withdrawCard.innerHTML = '';
     const live = currentWallet && currentWallet.provision_live;
     const bal = currentWallet ? currentWallet.cash_balance : null;
+    // 与 copier WITHDRAW_MIN_AMOUNT 默认值对齐（1 pUSD）；低于此值后端会 400 且不落库。
+    const withdrawMin = 1;
 
     withdrawCard.appendChild(el('p', { class: 'muted', text: t('wallet.withdrawIntro') }));
 
@@ -112,14 +148,27 @@ export async function walletPage() {
     form.appendChild(el('label', { text: t('wallet.withdrawTo') }));
     form.appendChild(addrSel);
 
-    const amountInput = el('input', { type: 'number', id: 'withdraw-amount', placeholder: t('wallet.amountPlaceholder'), step: '0.01', min: '0' });
+    const amountInput = el('input', {
+      type: 'number',
+      id: 'withdraw-amount',
+      placeholder: t('wallet.amountPlaceholder'),
+      step: '0.01',
+      min: String(withdrawMin),
+    });
     form.appendChild(el('label', { text: t('wallet.amountLabel'), style: 'margin-top:8px' }));
     form.appendChild(amountInput);
 
     withdrawCard.appendChild(form);
 
-    // 余额提示
-    withdrawCard.appendChild(el('p', { class: 'muted', style: 'margin-top:6px', text: bal == null ? t('wallet.balanceUnknown') : t('wallet.availableBalance', { balance: fmtUSD(bal) }) }));
+    // 余额 + 单笔下限提示
+    const balText = bal == null
+      ? t('wallet.balanceUnknown')
+      : t('wallet.availableBalance', { balance: fmtUSD(bal) });
+    withdrawCard.appendChild(el('p', {
+      class: 'muted',
+      style: 'margin-top:6px',
+      text: `${balText} · ${t('wallet.withdrawMinHint', { min: fmtUSD(withdrawMin) })}`,
+    }));
 
     const submitBtn = el('button', { class: 'primary', style: 'margin-top:10px', text: t('wallet.withdrawTitle'), disabled: !live });
     withdrawCard.appendChild(submitBtn);
@@ -141,8 +190,12 @@ export async function walletPage() {
       const amount = parseFloat(amountInput.value);
       if (!to) { toast(t('wallet.toastSelectAddress'), 'error'); return; }
       if (!amount || amount <= 0) { toast(t('wallet.toastInvalidAmount'), 'error'); return; }
+      if (amount < withdrawMin) {
+        toast(t('wallet.toastBelowMin', { min: fmtUSD(withdrawMin) }), 'error');
+        return;
+      }
       if (bal != null && amount > bal) { toast(t('wallet.toastExceedsBalance', { balance: fmtUSD(bal) }), 'error'); return; }
-      // 二次确认弹窗
+      // 二次确认弹窗（浏览器 confirm，非钱包签名；链上由平台 owner 代签）
       if (!confirm(t('wallet.confirmWithdraw', {
         amount: fmtUSD(amount),
         addressPrefix: to.slice(0, 10),
@@ -315,7 +368,7 @@ export async function walletPage() {
 function copyField(text, btnText = t('common.copy')) {
   const wrap = el('div', { style: 'display:flex;gap:6px;align-items:center;flex-wrap:wrap' });
   wrap.appendChild(el('code', { style: 'word-break:break-all', text: String(text) }));
-  wrap.appendChild(el('button', { class: 'sm', text: btnText, onclick: () => { navigator.clipboard.writeText(String(text)); toast(t('common.copied'), 'success'); } }));
+  wrap.appendChild(el('button', { class: 'sm', text: btnText, onclick: () => copyText(String(text)) }));
   return wrap;
 }
 

@@ -24,7 +24,7 @@ use crate::state::AppState;
 use sharpside_db::queries::account as acct;
 use sharpside_db::CopyOrderRow;
 use sharpside_shared::{Platform, Side};
-use sharpside_venues_core::Order;
+use sharpside_venues_core::{Order, VenueError};
 use tracing::{error, info, warn};
 
 const RECLAIM_BATCH: i64 = 100;
@@ -62,6 +62,7 @@ async fn tick(state: &AppState) -> Result<(), anyhow::Error> {
     let mut recovered = 0usize;
     let mut failed = 0usize;
     for order in stale {
+        crate::metrics::inc_reclaim();
         match retry_one(state, &order).await {
             RetryOutcome::Recovered(oid) => {
                 recovered += 1;
@@ -134,13 +135,20 @@ async fn retry_one(state: &AppState, order: &CopyOrderRow) -> RetryOutcome {
         size,
         idempotency_salt: Some(salt as u64),
         order_timestamp_ms: Some(ts as u64),
-        // 幂等重试沿用原订单的 GTC 语义（与首次派发一致）。
-        order_type: sharpside_venues_core::OrderType::Gtc,
+        // 幂等重试沿用首次派发的下单类型（默认 FAK，与 exec 一致），复用持久化 price → 相同 orderID。
+        order_type: state.config.copy_order_type,
         expiration: None,
         post_only: false,
     };
     match venue.place_order(&cred, order_req).await {
         Ok(fill) => {
+            // 安全修复 1.3：dry-sign 重试仍 dry-sign（POLYMARKET_CLOB_POST 仍关闭）→ 不得置 submitted
+            // （假 order_id 会让 reconcile 永远查不到）。置 failed 交人工核对，待启用 CLOB_POST 后重发。
+            if fill.dry {
+                return RetryOutcome::Failed(
+                    "幂等重试 place_order 仍为 dry-sign（POLYMARKET_CLOB_POST≠1），订单未提交 CLOB，待启用后重发".into(),
+                );
+            }
             // 重试成功：订单被 Venue 接受（含幂等命中已存在订单返回相同 orderID）。置 submitted 交对账。
             match acct::mark_copy_order_submitted(&state.db, order.id, &fill.order_id).await {
                 Ok(_) => RetryOutcome::Recovered(fill.order_id),
@@ -150,9 +158,14 @@ async fn retry_one(state: &AppState, order: &CopyOrderRow) -> RetryOutcome {
                 )),
             }
         }
-        Err(e) => RetryOutcome::Failed(format!(
-            "幂等重试 place_order 失败: {e}；订单可能在 Venue 端已存在（重复 orderID 被拒），人工核对"
-        )),
+        Err(e) => {
+            if matches!(e, VenueError::RateLimited) {
+                crate::metrics::inc_clob_429();
+            }
+            RetryOutcome::Failed(format!(
+                "幂等重试 place_order 失败: {e}；订单可能在 Venue 端已存在（重复 orderID 被拒），人工核对"
+            ))
+        }
     }
 }
 

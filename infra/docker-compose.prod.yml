@@ -1,0 +1,126 @@
+# 生产编排覆盖层（安全修复 3.4）。
+#
+# 用法（在 infra/ 目录）：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file ../.env up -d --build
+#
+# 与开发 compose 的差异：
+#   - postgres/redis/minio 不映射宿主机端口（仅内网）
+#   - 后端服务（venue-hub/follow/copier/account）不对外暴露
+#   - 仅暴露 web（及可选 admin，建议 VPN/内网）；gateway 不对公网
+#   - 口令/密钥全部走 env（禁止默认 sharpside_dev）
+#   - 去掉 web 静态 bind-mount（用镜像内文件）
+#   - 各服务加 deploy.resources CPU/mem 限额
+
+x-resources-small: &resources-small
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+      reservations:
+        cpus: "0.25"
+        memory: 128M
+
+x-resources-medium: &resources-medium
+  deploy:
+    resources:
+      limits:
+        cpus: "2.0"
+        memory: 1G
+      reservations:
+        cpus: "0.5"
+        memory: 256M
+
+services:
+  postgres:
+    <<: *resources-medium
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:?set POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB:-sharpside}"
+    # 生产：不绑定宿主机端口（仅 compose 网络内可达）
+    ports: !reset []
+
+  redis:
+    <<: *resources-small
+    ports: !reset []
+
+  minio:
+    <<: *resources-small
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}"
+    ports: !reset []
+
+  venue-hub:
+    <<: *resources-medium
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sharpside}"
+      VENUE_HUB_ADMIN_TOKEN: "${VENUE_HUB_ADMIN_TOKEN:?set VENUE_HUB_ADMIN_TOKEN}"
+      FOLLOW_SIGNAL_SECRET: "${FOLLOW_SIGNAL_SECRET:?set FOLLOW_SIGNAL_SECRET}"
+      APP_ENV: production
+    ports: !reset []
+
+  follow:
+    <<: *resources-small
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sharpside}"
+      INTERNAL_SIGNAL_SECRET: "${INTERNAL_SIGNAL_SECRET:?set INTERNAL_SIGNAL_SECRET}"
+      APP_ENV: production
+    ports: !reset []
+
+  copier:
+    <<: *resources-medium
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sharpside}"
+      APP_ENV: production
+    ports: !reset []
+
+  account:
+    <<: *resources-small
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sharpside}"
+      APP_ENV: production
+      ACCOUNT_INTERNAL_SECRET: "${ACCOUNT_INTERNAL_SECRET:?set ACCOUNT_INTERNAL_SECRET}"
+    ports: !reset []
+
+  gateway:
+    <<: *resources-small
+    environment:
+      APP_ENV: production
+    # gateway 仅供 web 容器访问，不对公网
+    ports: !reset []
+
+  admin:
+    <<: *resources-small
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sharpside}"
+      APP_ENV: production
+      # 生产强制 OIDC（见 apps/admin config fail-closed）
+      OIDC_ISSUER: "${OIDC_ISSUER:?set OIDC_ISSUER}"
+      OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}"
+      OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}"
+      OIDC_REDIRECT_URI: "${OIDC_REDIRECT_URI:?set OIDC_REDIRECT_URI}"
+      OIDC_ALLOWED_EMAILS: "${OIDC_ALLOWED_EMAILS:?set OIDC_ALLOWED_EMAILS}"
+      ADMIN_SESSION_SECRET: "${ADMIN_SESSION_SECRET:?set ADMIN_SESSION_SECRET}"
+      COOKIE_SECURE: "1"
+    # 建议仅内网/VPN 暴露；若必须公网，前置 TLS 终止 + IP allowlist
+    ports:
+      - "127.0.0.1:8086:8086"
+
+  web:
+    <<: *resources-small
+    environment:
+      GATEWAY_URL: "http://gateway:8085"
+      APP_ENV: production
+    # 去掉开发 bind-mount，使用镜像内静态文件
+    volumes: !reset []
+    ports:
+      - "80:8080"
+
+  tg-bot:
+    <<: *resources-small
+    environment:
+      APP_ENV: production
+      TG_BOT_TOKEN: "${TG_BOT_TOKEN:?set TG_BOT_TOKEN}"
+      TG_BOT_SECRET: "${TG_BOT_SECRET:?set TG_BOT_SECRET}"

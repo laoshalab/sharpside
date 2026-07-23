@@ -94,6 +94,55 @@ pub async fn list_due_signal_targets(
     Ok(rows)
 }
 
+/// 第 3 层：列出某 Venue 的**全部**信号监控目标（热钥 ∪ 活跃直接跟随 ∪ 活跃 identity 跟随下的 trader），
+/// **不做 due/interval 过滤**——trade_watch 每 tick 全量轮询，由 Venue client governor 限流。
+///
+/// 与 `list_due_signal_targets` 的差异：后者按 `last_scanned_at + interval` 到期过滤（positions diff 节流用）；
+/// 本函数返回全部目标，trade_watch 用 `latest_trade_ts` 作增量游标，不依赖 position 快照时间。
+pub async fn list_all_signal_targets(
+    pool: &PgPool,
+    platform: &str,
+) -> Result<Vec<SignalTarget>, DbError> {
+    let rows = sqlx::query_as::<_, SignalTarget>(
+        r#"
+        WITH direct AS (
+            SELECT follow_address AS address
+            FROM account.follow_relation
+            WHERE active AND deleted_at IS NULL
+              AND follow_platform = $1 AND follow_address IS NOT NULL
+        ),
+        ident_traders AS (
+            SELECT t.address
+            FROM account.follow_relation fr
+            JOIN trader_hub.traders t
+              ON t.identity_id = fr.follow_identity_id AND t.platform = $1
+            WHERE fr.active AND fr.deleted_at IS NULL AND fr.follow_identity_id IS NOT NULL
+        ),
+        hot AS (
+            SELECT address FROM trader_hub.hot_wallets WHERE platform = $1 AND enabled = true
+        ),
+        all_addr AS (
+            SELECT address FROM direct
+            UNION
+            SELECT address FROM ident_traders
+            UNION
+            SELECT address FROM hot
+        )
+        SELECT a.address, t.identity_id,
+               COALESCE((SELECT scan_interval_secs FROM trader_hub.hot_wallets
+                         WHERE platform = $1 AND address = a.address), 30) AS interval_secs,
+               NULL::timestamptz AS last_scanned_at
+        FROM all_addr a
+        LEFT JOIN trader_hub.traders t
+          ON t.platform = $1 AND t.address = a.address
+        "#,
+    )
+    .bind(platform)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// 写一条热钥浮仓快照（append-only，主键含 captured_at）。
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_position_snapshot(
@@ -149,6 +198,34 @@ pub async fn latest_snapshots(
     )
     .bind(platform)
     .bind(address)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 第 3 层：某 `(platform, address)` 在 `before` 时刻**之前**最近一轮扫描的每 token 快照。
+///
+/// diff 对账用"落后一轮闭合窗口"：用 `latest_snapshots`（上一轮 T_prev）减去本函数返回的
+/// 再上一轮（T_prev_prev），Δ 落在已闭合区间 [T_prev_prev, T_prev] 内，trade_watch 此时
+/// 早已轮询过该区间（间隔远小于 diff），故覆盖查询无竞态、无双计。
+///
+/// `before` 传上一轮的 `captured_at`：`DISTINCT ON (token_id)` 取 `captured_at < before` 的最新行。
+pub async fn latest_snapshots_before(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+    before: DateTime<Utc>,
+) -> Result<Vec<PositionSnapshot>, DbError> {
+    let rows = sqlx::query_as::<_, PositionSnapshot>(
+        r#"
+        SELECT DISTINCT ON (token_id) * FROM trader_hub.trader_positions_snapshot
+        WHERE platform = $1 AND address = $2 AND captured_at < $3
+        ORDER BY token_id, captured_at DESC
+        "#,
+    )
+    .bind(platform)
+    .bind(address)
+    .bind(before)
     .fetch_all(pool)
     .await?;
     Ok(rows)

@@ -1,7 +1,10 @@
-// api/client.js · fetch 封装：/api 前缀 + JWT 注入 + 401 全局事件 + 错误归一化。
+// api/client.js · fetch 封装：/api 前缀 + 401 全局事件 + 错误归一化。
 // 对应 docs/FRONTEND_DESIGN.md §8 状态管理与鉴权。
+//
+// 安全修复 3.1：JWT 由 HttpOnly cookie 携带，不再注入 Authorization 头。
+// 同源请求默认带 cookie；显式 credentials:'same-origin' 以防未来跨域变动丢 cookie。
 
-import { getToken, clearToken } from '../store/auth.js';
+import { clearUser } from '../store/auth.js';
 import { toast } from '../store/toast.js';
 import { t } from '../i18n/index.js';
 
@@ -15,17 +18,15 @@ export class ApiError extends Error {
   }
 }
 
-/// 通用请求：注入 JWT，归一化错误，401 触发全局事件。
+/// 通用请求：归一化错误，401 触发全局事件。
 /// path 不含 /api 前缀（如 '/venue-hub/traders'）。
 export async function request(path, { method = 'GET', body, headers = {}, raw = false } = {}) {
   const url = BASE + path;
   const h = { ...headers };
-  const token = getToken();
-  if (token) h['Authorization'] = 'Bearer ' + token;
   if (body !== undefined && !(body instanceof FormData) && !h['Content-Type']) {
     h['Content-Type'] = 'application/json';
   }
-  const opt = { method, headers: h };
+  const opt = { method, headers: h, credentials: 'same-origin' };
   if (body !== undefined) opt.body = body instanceof FormData ? body : JSON.stringify(body);
 
   let resp;
@@ -36,7 +37,7 @@ export async function request(path, { method = 'GET', body, headers = {}, raw = 
   }
 
   if (resp.status === 401) {
-    clearToken();
+    clearUser();
     window.dispatchEvent(new CustomEvent('auth:401'));
     throw new ApiError(t('errors.sessionExpired'), 401);
   }

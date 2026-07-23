@@ -6,11 +6,14 @@
 //!
 //! Phase 1a Step 10 落地。
 
+mod auth;
 mod config;
 mod error;
+mod metrics;
 mod registry;
 mod routes;
 mod state;
+mod worker_ticks;
 mod workers;
 
 use crate::config::Config;
@@ -20,9 +23,22 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // 安全修复 4.2：生产或 LOG_FORMAT=json → JSON 结构化日志。
+    {
+        let filter = EnvFilter::from_default_env();
+        let use_json = sharpside_shared::secrets::is_production()
+            || std::env::var("LOG_FORMAT").ok().as_deref() == Some("json");
+        if use_json {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_current_span(false)
+                .with_span_list(false)
+                .init();
+        } else {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
 
     let config = Config::from_env();
     tracing::info!(listen = %config.listen_addr, "venue-hub 启动");

@@ -10,12 +10,15 @@ use axum::http::request::Parts;
 use axum::response::IntoResponse;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
+use sharpside_db::queries::account as acct;
 use uuid::Uuid;
 
+/// `jti` 必填：无 jti 的旧 token 解码失败 → 强制重新登录，保证可吊销（安全修复 1.2）。
 #[derive(Debug, serde::Serialize, Deserialize)]
 struct Claims {
     sub: String,
     exp: usize,
+    jti: String,
 }
 
 #[derive(Debug, Clone)]
@@ -23,7 +26,8 @@ pub struct AuthUser {
     pub user_id: Uuid,
 }
 
-fn verify_jwt(token: &str, secret: &str) -> Result<Uuid, ApiError> {
+/// 校验签名 + exp，返回 Claims（含 jti）。不查 denylist（由 extractor 查）。
+fn verify_jwt(token: &str, secret: &str) -> Result<Claims, ApiError> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     let data = decode::<Claims>(
@@ -32,10 +36,7 @@ fn verify_jwt(token: &str, secret: &str) -> Result<Uuid, ApiError> {
         &validation,
     )
     .map_err(|_| ApiError::Unauthorized("invalid or expired token".into()))?;
-    data.claims
-        .sub
-        .parse::<Uuid>()
-        .map_err(|_| ApiError::Unauthorized("invalid subject".into()))
+    Ok(data.claims)
 }
 
 fn extract_bearer(parts: &Parts) -> Result<String, ApiError> {
@@ -50,6 +51,20 @@ fn extract_bearer(parts: &Parts) -> Result<String, ApiError> {
     Ok(token.trim().to_string())
 }
 
+/// 安全修复 3.1：优先 HttpOnly cookie，回退 Bearer。
+fn extract_token(parts: &Parts) -> Result<String, ApiError> {
+    if let Some(cookie) = parts
+        .headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+    {
+        if let Some(t) = sharpside_shared::session::extract_token_from_cookie_header(cookie) {
+            return Ok(t);
+        }
+    }
+    extract_bearer(parts)
+}
+
 #[async_trait]
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = axum::response::Response;
@@ -58,9 +73,19 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token = extract_bearer(parts).map_err(|e| e.into_response())?;
-        let user_id =
-            verify_jwt(&token, &state.config.jwt_secret).map_err(|e| e.into_response())?;
+        let token = extract_token(parts).map_err(|e| e.into_response())?;
+        let claims = verify_jwt(&token, &state.config.jwt_secret).map_err(|e| e.into_response())?;
+        let user_id = claims
+            .sub
+            .parse::<Uuid>()
+            .map_err(|_| ApiError::Unauthorized("invalid subject".into()).into_response())?;
+        // 吊销检查（denylist）：与 account/copier 同表同机制。
+        if acct::is_jwt_revoked(&state.db, &claims.jti)
+            .await
+            .map_err(|e| ApiError::Db(e).into_response())?
+        {
+            return Err(ApiError::Unauthorized("token revoked".into()).into_response());
+        }
         Ok(AuthUser { user_id })
     }
 }

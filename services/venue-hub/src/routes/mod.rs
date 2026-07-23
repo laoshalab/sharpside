@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", axum::routing::get(health::healthz))
         .route("/readyz", axum::routing::get(health::readyz))
+        .route("/metrics", axum::routing::get(crate::metrics::metrics))
         .route("/venues", axum::routing::get(venues::list_venues))
         .route("/traders", axum::routing::get(traders::list_traders))
         .route(

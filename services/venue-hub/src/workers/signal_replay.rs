@@ -64,6 +64,7 @@ async fn replay_once(state: &AppState) -> Result<(), anyhow::Error> {
         }
     }
     tracing::info!(n, "signal_replay 本轮处理完成");
+    state.worker_ticks.touch_signal_replay();
     Ok(())
 }
 
@@ -91,6 +92,9 @@ async fn bump(state: &AppState, row: sharpside_db::queries::outbox::SignalOutbox
             error = %err,
             "信号重发达上限，置死信，需人工核对"
         );
+        crate::metrics::inc_deadletter();
+        // 安全修复 4.2：死信触发 webhook 告警（Slack/PagerDuty 兼容 JSON）。
+        alert_deadletter(state, &row, &err, next_attempts).await;
     } else {
         tracing::warn!(
             outbox_id = row.id,
@@ -100,5 +104,45 @@ async fn bump(state: &AppState, row: sharpside_db::queries::outbox::SignalOutbox
             backoff_secs = backoff,
             "信号重发失败，退避重排"
         );
+    }
+}
+
+/// 安全修复 4.2：`ALERT_WEBHOOK_URL` 非空时 POST JSON 告警；失败仅 warn（不阻塞重放）。
+async fn alert_deadletter(
+    state: &AppState,
+    row: &sharpside_db::queries::outbox::SignalOutboxRow,
+    err: &str,
+    attempts: i32,
+) {
+    let url = match std::env::var("ALERT_WEBHOOK_URL") {
+        Ok(u) if !u.trim().is_empty() => u,
+        _ => return,
+    };
+    let payload = serde_json::json!({
+        "severity": "signal_outbox_deadletter",
+        "text": format!(
+            "[sharpside] signal outbox deadletter id={} signal_id={} attempts={} err={}",
+            row.id, row.signal_id, attempts, err
+        ),
+        "outbox_id": row.id,
+        "signal_id": row.signal_id,
+        "attempts": attempts,
+        "error": err,
+        "target_url": row.target_url,
+    });
+    match state.http.post(&url).json(&payload).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!(outbox_id = row.id, "deadletter 告警已发送");
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                outbox_id = row.id,
+                status = %resp.status(),
+                "deadletter 告警 webhook 非 2xx"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(outbox_id = row.id, error = %e, "deadletter 告警 webhook 发送失败");
+        }
     }
 }

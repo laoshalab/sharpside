@@ -17,6 +17,7 @@ import { settingsPage } from './pages/settings.js';
 import { subscriptionPage } from './pages/subscription.js';
 import { daemonKeyPage } from './pages/daemon-key.js';
 import { importPage } from './pages/import.js';
+import { identityPage } from './pages/identity.js';
 
 initTheme();
 initI18n();
@@ -29,6 +30,7 @@ route('/connect', connectPage, 'guest');
 route('/login', async () => { navigate('/connect'); }, 'guest');
 route('/leaderboard', leaderboardPage);
 route('/traders/:platform/:address', traderPage);
+route('/identities/:id', identityPage);
 // 兼容旧书签 #/import → #/watchlist（导入已并入观察名单页）
 route('/import', importPage);
 

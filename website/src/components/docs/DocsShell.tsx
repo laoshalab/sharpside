@@ -8,15 +8,21 @@ import type { SidebarSection } from "@/lib/docs";
 
 interface DocsShellProps {
   sidebarData: SidebarSection[];
+  localeFallback?: boolean;
   children: React.ReactNode;
 }
 
-export function DocsShell({ sidebarData, children }: DocsShellProps) {
+export function DocsShell({ sidebarData, localeFallback, children }: DocsShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const t = useTranslations("docs");
 
   return (
     <div className="pt-16">
+      {localeFallback ? (
+        <div className="border-b border-[var(--glass-border)] bg-[rgb(var(--accent))]/10 px-4 py-2 text-center text-sm text-[rgb(var(--text-secondary))]">
+          {t("localeFallbackNotice")}
+        </div>
+      ) : null}
       <div className="sticky top-16 z-30 flex items-center border-b border-[var(--glass-border)] bg-[rgb(var(--bg-primary))]/80 px-4 py-2 backdrop-blur-xl md:hidden">
         <button
           onClick={() => setMobileOpen(true)}

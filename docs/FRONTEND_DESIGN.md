@@ -89,7 +89,7 @@ Sharpside Web
 | 钱包（充值/提现） | `#/wallet` | F0 | `GET /copier/me/wallet` `POST /copier/me/wallet/withdraw` `GET /copier/me/wallet/withdrawals` | §6.5b |
 | 投资组合 | `#/portfolio` | F0 | `GET /copier/me/portfolio` (补) | §6.3 |
 | 订阅 | `#/settings/subscription` | F0 | `POST /account/me/subscription` | §6.12 |
-| Venue 凭证 | `#/settings/credentials` | F0 | `GET /me/venue-credentials` `GET /me/delegation` (补) | §6.5 |
+| Venue 凭证 | `#/settings/credentials` | F0 | `GET /me/venue-credentials` `GET /me/delegation` `POST /me/deposit-wallet/provision`（替换须 `confirm_replace`） | §6.5 |
 | daemon key | `#/settings/daemon-key` | F0 | `POST /me/daemon-api-key` | §6.13 |
 | 委托管理 | `#/settings/delegation` | F0(查)/Phase 2(撤) | `GET /me/delegation` (补) | §6.4 |
 | 安全日志 | `#/settings/security-log` | Phase 2 | `GET /me/security-log` (补) | — |

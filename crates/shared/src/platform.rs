@@ -35,6 +35,23 @@ impl Platform {
             Self::Azuro => "azuro",
         }
     }
+
+    /// 安全修复 4.4：链上地址归一（小写）；玩钱/KYC 平台原值保留。
+    pub fn normalize_trader_id(self, address: &str) -> String {
+        normalize_trader_id(self.as_str(), address)
+    }
+}
+
+/// 安全修复 4.4：交易者地址归一。
+///
+/// 链上 Venue（polymarket / zeitgeist / azuro）→ `to_lowercase`，
+/// 使 checksum 地址与全小写地址命中同一跟随关系 / 信号幂等键。
+/// 玩钱/KYC（kalshi / manifold）原值保留。
+pub fn normalize_trader_id(platform: &str, address: &str) -> String {
+    match platform {
+        "polymarket" | "zeitgeist" | "azuro" => address.to_lowercase(),
+        _ => address.to_string(),
+    }
 }
 
 impl std::fmt::Display for Platform {

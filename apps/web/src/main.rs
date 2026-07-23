@@ -9,7 +9,7 @@
 
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, get};
 use axum::Router;
 use std::env;
 use std::sync::Arc;
@@ -26,6 +26,41 @@ async fn no_store(req: axum::extract::Request, next: Next) -> Response {
     res
 }
 
+/// 安全修复 3.2：CSP + 安全响应头。
+///
+/// - `Content-Security-Policy`：脚本仅同源（防 XSS 注入/外发），connect 同源（防 token 外泄），
+///   样式允许 inline（前端用 `style="..."` 属性，非 XSS 向量）。
+/// - `X-Frame-Options: DENY` / `frame-ancestors 'none'`：防点击劫持。
+/// - `Referrer-Policy: strict-origin-when-cross-origin`：跨域仅泄 origin 不泄 path。
+/// - `X-Content-Type-Options: nosniff`：防 MIME 嗅探。
+///
+/// 注：前端已无内联脚本（theme-init.js / config.js 均外部同源），故 `script-src 'self'` 不含 unsafe-inline。
+async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; \
+             object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+        ),
+    );
+    h.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    h.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    res
+}
+
 #[derive(Clone)]
 struct State {
     gateway_url: String,
@@ -34,9 +69,22 @@ struct State {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // 安全修复 4.2：生产或 LOG_FORMAT=json → JSON 结构化日志。
+    {
+        let filter = tracing_subscriber::EnvFilter::from_default_env();
+        let use_json = std::env::var("APP_ENV").ok().as_deref() == Some("production")
+            || std::env::var("LOG_FORMAT").ok().as_deref() == Some("json");
+        if use_json {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_current_span(false)
+                .with_span_list(false)
+                .init();
+        } else {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
 
     let listen = env::var("WEB_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let gateway_url = env::var("GATEWAY_URL").unwrap_or_else(|_| "http://127.0.0.1:8085".into());
@@ -51,6 +99,9 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         // API 反代到 gateway（透传完整路径：/api/venue-hub/... /api/follow/... /api/account/... /api/copier/... /api/me/dashboard）
         .route("/api/*path", any(proxy))
+        // 安全修复 2.3：向前端注入运行环境标志（APP_ENV=production → window.__SHARPSIDE__.production=true）。
+        // 订阅页据此隐藏「Activate (Test)」与 $X/mo 占位，改「联系开通」；dev 仍可测。
+        .route("/config.js", get(config_js))
         // 静态资源（styles/、main.js、api/、store/、components/、pages/）
         // SPA fallback：未知非 `/api` 路径回退 index.html，让 hash 路由直接访问/刷新可命中。
         .nest_service(
@@ -58,13 +109,17 @@ async fn main() -> anyhow::Result<()> {
             ServeDir::new("apps/web/static").fallback(ServeFile::new("apps/web/static/index.html")),
         )
         .layer(axum::middleware::from_fn(no_store))
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(Arc::new(state));
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!(listen = %listen, gateway = %gateway_url, "web 启动");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
@@ -91,6 +146,7 @@ async fn shutdown_signal() {
 
 async fn proxy(
     axum::extract::State(state): axum::extract::State<Arc<State>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     req: axum::extract::Request,
 ) -> Response {
@@ -101,14 +157,31 @@ async fn proxy(
 
     let (parts, body) = req.into_parts();
     let mut fwd = reqwest::Client::new().request(convert_method(parts.method), &url);
-    // 透传 header（剔除 hop-by-hop）
+    // 透传 header（剔除 hop-by-hop；转发头由下方按受信规则重写）
     for (k, v) in parts.headers.iter() {
         let name = k.as_str().to_lowercase();
-        if matches!(name.as_str(), "host" | "content-length" | "connection") {
+        if matches!(
+            name.as_str(),
+            "host" | "content-length" | "connection" | "x-forwarded-for" | "x-real-ip"
+        ) {
             continue;
         }
         fwd = fwd.header(k.clone(), v.clone());
     }
+    // 受信 peer（Caddy/LB）才采信其 XFF；否则用 ConnectInfo，忽略客户端伪造。
+    let client = sharpside_shared::client_ip::resolve_client_ip(
+        Some(addr.ip()),
+        parts
+            .headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok()),
+        parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok()),
+    );
+    fwd = fwd.header("x-real-ip", &client);
+    fwd = fwd.header("x-forwarded-for", &client);
     let bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
         Ok(b) => b,
         Err(_) => return (axum::http::StatusCode::BAD_REQUEST, "body read failed").into_response(),
@@ -152,4 +225,23 @@ fn convert_method(m: axum::http::Method) -> reqwest::Method {
         axum::http::Method::DELETE => reqwest::Method::DELETE,
         _ => reqwest::Method::GET,
     }
+}
+
+/// `GET /config.js` —— 注入前端运行环境配置。安全修复 2.3。
+///
+/// 返回 `window.__SHARPSIDE__ = { production: <bool> };`，供订阅页等判断是否隐藏测试 UI。
+/// `APP_ENV=production`（或 `prod`）→ production=true；其余（dev/test/缺省）→ false。
+async fn config_js() -> Response {
+    let app_env = env::var("APP_ENV").unwrap_or_default();
+    let production = matches!(app_env.as_str(), "production" | "prod");
+    let body = format!(
+        "window.__SHARPSIDE__ = Object.assign(window.__SHARPSIDE__ || {{}}, {{ production: {} }});",
+        production
+    );
+    let mut resp = Response::new(body.into());
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/javascript; charset=utf-8"),
+    );
+    resp
 }

@@ -40,9 +40,11 @@ pub struct Config {
     /// **必须配置**：follow 侧已强制要求（空串即 401 拒收信号），故本侧空串会导致所有信号被拒。
     /// 须与 follow 服务的 `INTERNAL_SIGNAL_SECRET` 一致。
     pub follow_signal_secret: String,
-    /// 运维/admin 令牌：保护写端点（如 `/traders/import*`）免遭未鉴权滥用。
-    /// 请求须带 `Authorization: Bearer <token>`。生产由 `assert_secret` 强制非空/非默认值。
+    /// 运维/admin 令牌：保护写端点；用户 JWT（cookie）亦可导入。
+    /// Admin：`Authorization: Bearer <VENUE_HUB_ADMIN_TOKEN>`；用户：登录 cookie / Bearer JWT。
     pub admin_token: String,
+    /// 与 account/follow 共用的 JWT secret（用户 ImportBox 走 cookie JWT）。
+    pub jwt_secret: String,
 }
 
 /// 各 Venue 的启用开关。未启用的 Venue 不注册到 VenueRegistry，worker 跳过。
@@ -82,6 +84,9 @@ pub struct WorkerIntervals {
     pub backfill_refresh_days: u32,
     /// signal_replay worker 间隔（秒）：扫 signal_outbox 重发未投递信号（H4 修复）。
     pub signal_replay_secs: u64,
+    /// 第 3 层：trade_watch worker 间隔（秒）——逐笔成交信号主源。每 tick 全量轮询被跟随/热钥地址的
+    /// `/trades`，由 Venue client governor 限流。默认 3s；被跟随地址多时 governor 排队，下调无益。
+    pub trade_watch_secs: u64,
 }
 
 fn parse_bool(name: &str, default: bool) -> bool {
@@ -131,7 +136,9 @@ impl Config {
                 identity_secs: parse_u64("WORKER_IDENTITY_SECS", 600),
                 perf_secs: parse_u64("WORKER_PERF_SECS", 900),
                 hot_secs: parse_u64("WORKER_HOT_SECS", 5),
-                follow_scan_secs: parse_u64("WORKER_FOLLOW_SCAN_SECS", 30),
+                // 第 2 层：跟单扫描默认 10s（原 30s），缩短源钱包→跟单信号滞后。
+                // 仍可经 WORKER_FOLLOW_SCAN_SECS 上调；受 Data API /positions 速率（~150 req/10s）与 hot_due_cap 约束。
+                follow_scan_secs: parse_u64("WORKER_FOLLOW_SCAN_SECS", 10),
                 hot_due_cap: parse_u64("WORKER_HOT_DUE_CAP", 50),
                 official_pnl_secs: parse_u64("WORKER_OFFICIAL_PNL_SECS", 600),
                 official_value_batch: parse_u64("WORKER_OFFICIAL_VALUE_BATCH", 100) as i64,
@@ -139,6 +146,8 @@ impl Config {
                 backfill_batch: parse_u64("WORKER_BACKFILL_BATCH", 25) as u32,
                 backfill_refresh_days: parse_u64("WORKER_BACKFILL_REFRESH_DAYS", 7) as u32,
                 signal_replay_secs: parse_u64("WORKER_SIGNAL_REPLAY_SECS", 15),
+                // 第 3 层：逐笔成交信号主源。3s 轮询 + governor 限流；Data API 成交可见延迟是物理下限。
+                trade_watch_secs: parse_u64("WORKER_TRADE_WATCH_SECS", 3),
             },
             auto_match_threshold: parse_f64("AUTO_MATCH_THRESHOLD", 0.7),
             identity_threshold: parse_f64("IDENTITY_THRESHOLD", 0.6),
@@ -165,6 +174,11 @@ impl Config {
                 "VENUE_HUB_ADMIN_TOKEN",
                 &env::var("VENUE_HUB_ADMIN_TOKEN")
                     .unwrap_or_else(|_| "dev-admin-token".into()),
+            )
+            .to_string(),
+            jwt_secret: sharpside_shared::secrets::assert_secret(
+                "JWT_SECRET",
+                &env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into()),
             )
             .to_string(),
         }

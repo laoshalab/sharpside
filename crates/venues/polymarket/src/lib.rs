@@ -85,8 +85,8 @@ impl PolymarketVenue {
         self
     }
 
-    /// 注入 KMS（生产路径解密 owner EOA 私钥 / L2 secret）。
-    /// copier 服务启动时注入 `DevKms` 或 `AwsKms`，place_order 自动走 KMS 解密。
+    /// 注入 KMS（生产路径解密 owner EOA 私钥 / L2 secret 后站内签名）。
+    /// copier 启动时注入 `LocalKms`（生产）或 `DevKms`（dev）；`place_order` 自动走 KMS 解密。
     pub fn with_kms(mut self, kms: std::sync::Arc<dyn sharpside_kms::Kms>) -> Self {
         self.kms = Some(kms);
         self
@@ -215,6 +215,7 @@ impl Venue for PolymarketVenue {
                 encrypted_owner_key,
                 l2_api_key,
                 encrypted_l2_secret,
+                encrypted_l2_passphrase,
                 l2_passphrase,
                 builder_code,
             } => {
@@ -259,13 +260,16 @@ impl Venue for PolymarketVenue {
                     let l2_secret = self
                         .resolve_l2_secret(encrypted_l2_secret)
                         .map_err(VenueError::Auth)?;
+                    let l2_passphrase = self
+                        .resolve_l2_passphrase(encrypted_l2_passphrase.as_deref(), l2_passphrase)
+                        .map_err(VenueError::Auth)?;
                     let order_id = self
                         .client
                         .post_order_l2(
                             &signed,
                             l2_api_key,
                             &l2_secret,
-                            l2_passphrase,
+                            &l2_passphrase,
                             signer.address(),
                             order.order_type,
                             order.expiration,
@@ -279,6 +283,7 @@ impl Venue for PolymarketVenue {
                         filled_price: order.price,
                         tx_hash: Some(signed.signature.clone()),
                         fee: 0.0,
+                        dry: false,
                     })
                 } else {
                     tracing::info!(
@@ -297,6 +302,7 @@ impl Venue for PolymarketVenue {
                         filled_price: order.price,
                         tx_hash: Some(signed.signature.clone()),
                         fee: 0.0,
+                        dry: true,
                     })
                 }
             }
@@ -335,6 +341,7 @@ impl Venue for PolymarketVenue {
                         filled_price: order.price,
                         tx_hash: Some(signed.signature.clone()),
                         fee: 0.0,
+                        dry: false,
                     })
                 } else {
                     tracing::info!(
@@ -350,6 +357,7 @@ impl Venue for PolymarketVenue {
                         filled_price: order.price,
                         tx_hash: Some(signed.signature.clone()),
                         fee: 0.0,
+                        dry: true,
                     })
                 }
             }
@@ -371,6 +379,7 @@ impl Venue for PolymarketVenue {
                 encrypted_owner_key,
                 l2_api_key,
                 encrypted_l2_secret,
+                encrypted_l2_passphrase,
                 l2_passphrase,
                 ..
             } => {
@@ -385,9 +394,12 @@ impl Venue for PolymarketVenue {
                 let l2_secret = self
                     .resolve_l2_secret(encrypted_l2_secret)
                     .map_err(VenueError::Auth)?;
+                let l2_passphrase = self
+                    .resolve_l2_passphrase(encrypted_l2_passphrase.as_deref(), l2_passphrase)
+                    .map_err(VenueError::Auth)?;
                 let v = self
                     .client
-                    .get_balance_allowance(signer.address(), l2_api_key, &l2_secret, l2_passphrase)
+                    .get_balance_allowance(signer.address(), l2_api_key, &l2_secret, &l2_passphrase)
                     .await
                     .map_err(VenueError::Auth)?;
                 // CLOB `/balance-allowance` 返回原始原子单位字符串（USDC 6 位小数），
@@ -424,6 +436,7 @@ impl Venue for PolymarketVenue {
             encrypted_owner_key,
             l2_api_key,
             encrypted_l2_secret,
+            encrypted_l2_passphrase,
             l2_passphrase,
             ..
         } = cred
@@ -443,13 +456,16 @@ impl Venue for PolymarketVenue {
         let l2_secret = self
             .resolve_l2_secret(encrypted_l2_secret)
             .map_err(VenueError::Auth)?;
+        let l2_passphrase = self
+            .resolve_l2_passphrase(encrypted_l2_passphrase.as_deref(), l2_passphrase)
+            .map_err(VenueError::Auth)?;
         let v = self
             .client
             .get_order_l2(
                 order_id,
                 l2_api_key,
                 &l2_secret,
-                l2_passphrase,
+                &l2_passphrase,
                 signer.address(),
             )
             .await
@@ -497,6 +513,7 @@ impl Venue for PolymarketVenue {
             encrypted_owner_key,
             l2_api_key,
             encrypted_l2_secret,
+            encrypted_l2_passphrase,
             l2_passphrase,
             ..
         } = cred
@@ -516,12 +533,15 @@ impl Venue for PolymarketVenue {
         let l2_secret = self
             .resolve_l2_secret(encrypted_l2_secret)
             .map_err(VenueError::Auth)?;
+        let l2_passphrase = self
+            .resolve_l2_passphrase(encrypted_l2_passphrase.as_deref(), l2_passphrase)
+            .map_err(VenueError::Auth)?;
         self.client
             .cancel_order_l2(
                 order_id,
                 l2_api_key,
                 &l2_secret,
-                l2_passphrase,
+                &l2_passphrase,
                 signer.address(),
             )
             .await
@@ -1028,6 +1048,22 @@ impl PolymarketVenue {
         &self,
         cred: &Credential,
     ) -> Result<alloy_signer_local::PrivateKeySigner, String> {
+        if sharpside_shared::secrets::is_production() {
+            if std::env::var("POLYMARKET_DEV_PRIVATE_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .is_some()
+            {
+                return Err(
+                    "生产环境禁止 POLYMARKET_DEV_PRIVATE_KEY（会覆盖 per-user KMS 密钥）".into(),
+                );
+            }
+            if std::env::var("POLYMARKET_DEV_PLAINTEXT_HANDLE").ok().as_deref() == Some("1") {
+                return Err(
+                    "生产环境禁止 POLYMARKET_DEV_PLAINTEXT_HANDLE=1（密文当明文）".into(),
+                );
+            }
+        }
         if let Some(s) = &self.dev_signer {
             return Ok(s.clone());
         }
@@ -1064,6 +1100,22 @@ impl PolymarketVenue {
         &self,
         encrypted_owner_key: &str,
     ) -> Result<alloy_signer_local::PrivateKeySigner, String> {
+        if sharpside_shared::secrets::is_production() {
+            if std::env::var("POLYMARKET_DEV_PRIVATE_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .is_some()
+            {
+                return Err(
+                    "生产环境禁止 POLYMARKET_DEV_PRIVATE_KEY（会覆盖 per-user KMS 密钥）".into(),
+                );
+            }
+            if std::env::var("POLYMARKET_DEV_PLAINTEXT_HANDLE").ok().as_deref() == Some("1") {
+                return Err(
+                    "生产环境禁止 POLYMARKET_DEV_PLAINTEXT_HANDLE=1（密文当明文）".into(),
+                );
+            }
+        }
         if let Some(s) = &self.dev_signer {
             return Ok(s.clone());
         }
@@ -1106,6 +1158,35 @@ impl PolymarketVenue {
         } else {
             Err("KMS 未注入且 env 未设：无法从 encrypted_l2_secret 解出 L2 secret（dev 可设 POLYMARKET_DEV_PLAINTEXT_HANDLE=1，生产注入 KMS）".into())
         }
+    }
+
+    /// 解出 L2 passphrase。安全修复 2.1：优先 KMS 解密 `encrypted_l2_passphrase`；
+    /// 旧凭证无此字段（None）→ 回退明文 `l2_passphrase` 兼容（warn）。两者皆空 → 报错。
+    fn resolve_l2_passphrase(
+        &self,
+        encrypted: Option<&str>,
+        legacy_plaintext: &str,
+    ) -> Result<String, String> {
+        if let Some(enc) = encrypted.filter(|s| !s.is_empty()) {
+            if let Some(kms) = &self.kms {
+                return kms
+                    .decrypt(enc)
+                    .map_err(|e| format!("KMS 解密 L2 passphrase 失败: {e}"));
+            }
+            if std::env::var("POLYMARKET_DEV_PLAINTEXT_HANDLE")
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
+                return Ok(enc.to_string());
+            }
+            return Err("KMS 未注入且 env 未设：无法从 encrypted_l2_passphrase 解出（dev 可设 POLYMARKET_DEV_PLAINTEXT_HANDLE=1，生产注入 KMS）".into());
+        }
+        if !legacy_plaintext.is_empty() {
+            tracing::warn!("凭证无 encrypted_l2_passphrase，回退明文 l2_passphrase（旧凭证，建议重新预配以加密落库）");
+            return Ok(legacy_plaintext.to_string());
+        }
+        Err("L2 passphrase 缺失（既无 encrypted_l2_passphrase 也无明文 l2_passphrase）".into())
     }
 }
 
@@ -1155,12 +1236,17 @@ fn map_position(d: PositionDto, trader_id: &str) -> Option<Position> {
     Some(Position {
         platform: Platform::Polymarket,
         trader_id: trader_id.into(),
-        market_id: d.market?,
+        // 真实 API 用 `conditionId`，mock 用 `market`；两者择一。
+        market_id: d.market.or(d.condition_id)?,
         token_id: d.asset?,
         size: d.size.unwrap_or(0.0),
         avg_price: d.avg_price.unwrap_or(0.0),
-        current_price: d.current_price.unwrap_or(0.0),
+        current_price: d.current_price.or(d.cur_price).unwrap_or(0.0),
         pnl: d.realized_pnl.unwrap_or(0.0),
+        title: d.title,
+        slug: d.slug,
+        event_slug: d.event_slug,
+        outcome: d.outcome.or(d.side),
     })
 }
 
@@ -1182,7 +1268,12 @@ fn map_trade(d: TradeDto, trader_id: &str) -> Option<Trade> {
 
 fn map_market(d: MarketDto) -> Option<Market> {
     let tags = d.tags.unwrap_or_default();
-    let category = derive_category(&tags);
+    // 优先 Gamma 自带 category，再按 tags 派生站内枚举。
+    let category = d
+        .category
+        .as_deref()
+        .and_then(normalize_site_category)
+        .or_else(|| derive_category(&tags));
     Some(Market {
         platform: Platform::Polymarket,
         venue_market_id: d.condition_id?,
@@ -1197,19 +1288,14 @@ fn map_market(d: MarketDto) -> Option<Market> {
     })
 }
 
-/// 从 Polymarket Gamma `/markets` 返回的 `tags` 派生站内分类。
-///
-/// Polymarket tags 是自由标签（如 `["Politics","Election"]`），其排行榜 category 参数
-/// 用固定枚举（OVERALL/POLITICS/SPORTS/ESPORTS/CRYPTO/CULTURE/MENTIONS/WEATHER/
-/// ECONOMICS/TECH/FINANCE）。这里按 tag 大小写无关匹配已知分类，
-/// 命中即返回该分类；无匹配返回 None（归入 OVERALL，由 perf worker 兜底）。
-///
-/// 多 tag 命中时按 `CATEGORY_TAGS` 顺序取首个（Politics 优先于 Election 等子类）。
-fn derive_category(tags: &[String]) -> Option<String> {
-    // (tag 关键字, 对应站内分类)。顺序即优先级。
-    // 站内分类与 Polymarket Data API `/v1/leaderboard` category 枚举对齐；
-    // 部分别名 tag（election/geopolitics/art/…）归入最近的官方分类。
-    const CATEGORY_TAGS: &[(&str, &str)] = &[
+/// 把 Gamma/自由文本类目归一到站内枚举（与 `derive_category` / Data API 对齐）。
+fn normalize_site_category(raw: &str) -> Option<String> {
+    let key = raw.trim().to_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    const MAP: &[(&str, &str)] = &[
+        ("overall", "OVERALL"),
         ("politics", "POLITICS"),
         ("election", "POLITICS"),
         ("geopolitics", "POLITICS"),
@@ -1217,6 +1303,7 @@ fn derive_category(tags: &[String]) -> Option<String> {
         ("sports", "SPORTS"),
         ("esports", "ESPORTS"),
         ("crypto", "CRYPTO"),
+        ("cryptocurrency", "CRYPTO"),
         ("culture", "CULTURE"),
         ("art", "CULTURE"),
         ("mentions", "MENTIONS"),
@@ -1227,9 +1314,32 @@ fn derive_category(tags: &[String]) -> Option<String> {
         ("technology", "TECH"),
         ("finance", "FINANCE"),
     ];
-    for (needle, cat) in CATEGORY_TAGS {
-        if tags.iter().any(|t| t.to_lowercase() == *needle) {
-            return Some((*cat).to_string());
+    MAP.iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| (*v).to_string())
+}
+
+/// 从 Polymarket Gamma `/markets` 返回的 `tags` 派生站内分类。
+///
+/// Polymarket tags 是自由标签（如 `["Politics","Election"]`），其排行榜 category 参数
+/// 用固定枚举（OVERALL/POLITICS/SPORTS/ESPORTS/CRYPTO/CULTURE/MENTIONS/WEATHER/
+/// ECONOMICS/TECH/FINANCE）。这里按 tag 大小写无关匹配已知分类，
+/// 命中即返回该分类；无匹配返回 None（归入 OVERALL，由 perf worker 兜底）。
+///
+/// 多 tag 命中时按站内枚举优先级取首个（Politics 优先于 Crypto 等）。
+fn derive_category(tags: &[String]) -> Option<String> {
+    const PRIORITY: &[&str] = &[
+        "POLITICS", "SPORTS", "ESPORTS", "CRYPTO", "CULTURE", "MENTIONS", "WEATHER",
+        "ECONOMICS", "TECH", "FINANCE",
+    ];
+    let hit: Vec<String> = tags
+        .iter()
+        .filter_map(|t| normalize_site_category(t))
+        .filter(|c| c != "OVERALL")
+        .collect();
+    for p in PRIORITY {
+        if hit.iter().any(|c| c == *p) {
+            return Some((*p).to_string());
         }
     }
     None
@@ -1329,33 +1439,48 @@ mod tests {
 
     #[test]
     fn map_position_filters_missing_fields() {
-        // 缺 market → None
+        // 缺 market / conditionId → None
         let d = PositionDto {
             user: Some("0xabc".into()),
             market: None,
+            condition_id: None,
             asset: Some("12345".into()),
             size: Some(100.0),
             avg_price: Some(0.5),
             current_price: Some(0.6),
+            cur_price: None,
             realized_pnl: Some(10.0),
             side: Some("YES".into()),
+            title: None,
+            slug: None,
+            event_slug: None,
+            outcome: None,
         };
         assert!(map_position(d, "0xabc").is_none());
 
-        // 完整 → Some
+        // 完整 → Some（含 title/outcome 透传）
         let d = PositionDto {
             user: Some("0xabc".into()),
             market: Some("0xcond".into()),
+            condition_id: None,
             asset: Some("12345".into()),
             size: Some(100.0),
             avg_price: Some(0.5),
             current_price: Some(0.6),
+            cur_price: None,
             realized_pnl: Some(10.0),
             side: Some("YES".into()),
+            title: Some("Will Trump win?".into()),
+            slug: Some("trump-win".into()),
+            event_slug: Some("trump-win".into()),
+            outcome: Some("Yes".into()),
         };
         let p = map_position(d, "0xabc").unwrap();
         assert_eq!(p.market_id, "0xcond");
         assert!((p.size - 100.0).abs() < 1e-9);
+        assert_eq!(p.title.as_deref(), Some("Will Trump win?"));
+        assert_eq!(p.outcome.as_deref(), Some("Yes"));
+        assert_eq!(p.event_slug.as_deref(), Some("trump-win"));
     }
 
     #[test]
@@ -1454,6 +1579,7 @@ mod tests {
             condition_id: None, // 缺 → None
             question: Some("q".into()),
             slug: None,
+            category: None,
             tags: None,
             end_date: None,
             outcomes: None,
@@ -1466,6 +1592,7 @@ mod tests {
             condition_id: Some("0xcond".into()),
             question: Some("Will Trump win?".into()),
             slug: Some("trump".into()),
+            category: None,
             tags: Some(vec!["politics".into()]),
             end_date: None,
             outcomes: None,
@@ -1486,6 +1613,7 @@ mod tests {
             condition_id: Some("0xcond".into()),
             question: Some("q".into()),
             slug: None,
+            category: None,
             tags: None,
             end_date: None,
             outcomes: None,
@@ -1623,6 +1751,7 @@ mod tests {
             .await
             .unwrap();
         assert!(fill.order_id.starts_with("dry-sign-"));
+        assert!(fill.dry, "dry-sign Fill 须 dry=true（不得记成交，安全修复 1.3）");
         let tx = fill.tx_hash.unwrap();
         assert!(tx.starts_with("0x"));
         assert_eq!(tx.len(), 2 + 130); // 65 字节签名
@@ -1644,6 +1773,7 @@ mod tests {
             encrypted_owner_key: "ignored-with-dev-signer".into(),
             l2_api_key: "api-key".into(),
             encrypted_l2_secret: "l2-secret".into(),
+            encrypted_l2_passphrase: None,
             l2_passphrase: "pass".into(),
             builder_code: "sharpside-builder".into(),
         };
@@ -1666,6 +1796,7 @@ mod tests {
             .await
             .unwrap();
         assert!(fill.order_id.starts_with("dry-sign-deposit-"));
+        assert!(fill.dry, "dry-sign Deposit Fill 须 dry=true（不得记成交，安全修复 1.3）");
         let tx = fill.tx_hash.unwrap();
         assert!(tx.starts_with("0x"));
         // POLY_1271 走 ERC-7739 wrap = 317 字节 = 634 hex + 0x（对齐官方 TS SDK）。
@@ -1689,6 +1820,7 @@ mod tests {
             encrypted_owner_key: "x".into(),
             l2_api_key: "k".into(),
             encrypted_l2_secret: "s".into(),
+            encrypted_l2_passphrase: None,
             l2_passphrase: "p".into(),
             builder_code: "bc".into(),
         };
@@ -1738,6 +1870,7 @@ mod tests {
             encrypted_owner_key,
             l2_api_key: "api-key".into(),
             encrypted_l2_secret,
+            encrypted_l2_passphrase: None,
             l2_passphrase: "pass".into(),
             builder_code: "sharpside-builder".into(),
         };
@@ -1760,6 +1893,7 @@ mod tests {
             .await
             .unwrap();
         assert!(fill.order_id.starts_with("dry-sign-deposit-"));
+        assert!(fill.dry, "dry-sign Deposit Fill 须 dry=true（不得记成交，安全修复 1.3）");
         let tx = fill.tx_hash.unwrap();
         assert!(tx.starts_with("0x"));
         // POLY_1271 走 ERC-7739 wrap = 317 字节 = 634 hex + 0x（对齐官方 TS SDK）。
@@ -1780,6 +1914,7 @@ mod tests {
             encrypted_owner_key: "not-a-dev-ciphertext".into(),
             l2_api_key: "k".into(),
             encrypted_l2_secret: "s".into(),
+            encrypted_l2_passphrase: None,
             l2_passphrase: "p".into(),
             builder_code: "bc".into(),
         };
@@ -1812,6 +1947,7 @@ mod tests {
                 .into(),
             l2_api_key: "k".into(),
             encrypted_l2_secret: "s".into(),
+            encrypted_l2_passphrase: None,
             l2_passphrase: "p".into(),
             builder_code: "bc".into(),
         }
@@ -1872,5 +2008,30 @@ mod tests {
         assert!(matches!(err, VenueError::Auth(_)));
         let err = v.merge(&dw_cred(), GOOD_COND, 5.0).await.unwrap_err();
         assert!(matches!(err, VenueError::Auth(_)));
+    }
+
+    /// 安全修复 2.1：resolve_l2_passphrase 三路径。
+    #[test]
+    fn resolve_l2_passphrase_encrypted_path() {
+        let kms = sharpside_kms::DevKms::enabled_for_test();
+        let enc = kms.encrypt("my-passphrase").unwrap();
+        let v = PolymarketVenue::new().with_kms(std::sync::Arc::new(kms));
+        let got = v.resolve_l2_passphrase(Some(&enc), "").unwrap();
+        assert_eq!(got, "my-passphrase", "加密路径应 KMS 解密出明文");
+    }
+
+    #[test]
+    fn resolve_l2_passphrase_legacy_fallback() {
+        // 旧凭证：无 encrypted_l2_passphrase → 回退明文 l2_passphrase。
+        let v = PolymarketVenue::new();
+        let got = v.resolve_l2_passphrase(None, "legacy-pass").unwrap();
+        assert_eq!(got, "legacy-pass", "旧凭证应回退明文 passphrase");
+    }
+
+    #[test]
+    fn resolve_l2_passphrase_both_empty_errors() {
+        let v = PolymarketVenue::new();
+        let err = v.resolve_l2_passphrase(None, "").unwrap_err();
+        assert!(err.contains("缺失"), "双空应报错，实际: {err}");
     }
 }

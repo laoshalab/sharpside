@@ -167,6 +167,23 @@ pub async fn list_all_visible_traders(
     Ok(rows)
 }
 
+/// 列出某平台全部 visible 地址（无硬上限）。
+///
+/// 供 official_pnl `/value` delta 兜底：避免 `list_all_visible_traders(..., 5000)` 截断。
+pub async fn list_visible_addresses(
+    pool: &PgPool,
+    platform: &str,
+) -> Result<Vec<String>, DbError> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT address FROM trader_hub.traders \
+         WHERE platform = $1 AND visibility = 'visible'",
+    )
+    .bind(platform)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// admin 视角：列出全部交易者（含 hidden/blocked），可选平台/搜索过滤。
 /// 对应 `docs/FRONTEND_DESIGN.md` §7.6 可见性管控页。
 pub async fn list_all_traders(

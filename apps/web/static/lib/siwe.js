@@ -67,7 +67,7 @@ function rfc3339Ms(iso) {
 /// 构造 EIP-4361 SIWE 消息文本（与后端 `signinwithethereum` 解析器格式一致）。
 ///
 /// 注意：消息**不能**以多余空行结尾，否则解析报 Unexpected Content。
-/// `domain` 须用服务端 `/auth/wallet/nonce` 返回的 domain（保证与 PUBLIC_DOMAIN 一致）。
+/// `domain` / `uri` 须用服务端 `/auth/wallet/nonce` 返回值（与 PUBLIC_DOMAIN / PUBLIC_URI 白名单一致）。
 export function buildSiwe({
   domain,
   address,

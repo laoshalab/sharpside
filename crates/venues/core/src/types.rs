@@ -124,6 +124,18 @@ pub struct Position {
     pub avg_price: f64,
     pub current_price: f64,
     pub pnl: f64,
+    /// 市场标题（Data API `/positions` 的 `title`；其它 Venue 可空）。
+    #[serde(default)]
+    pub title: Option<String>,
+    /// 市场 slug（`https://polymarket.com/event/{slug}` 用；优先 `event_slug`）。
+    #[serde(default)]
+    pub slug: Option<String>,
+    /// 事件 slug（Polymarket 外链优先用这个）。
+    #[serde(default)]
+    pub event_slug: Option<String>,
+    /// 方向方向（Yes / No 等）。
+    #[serde(default)]
+    pub outcome: Option<String>,
 }
 
 /// 通用成交。对应 `docs/VENUE_DESIGN.md` §2。
@@ -163,7 +175,11 @@ pub enum Credential {
         l2_api_key: String,
         /// KMS 加密的 L2 secret
         encrypted_l2_secret: String,
-        /// L2 passphrase
+        /// KMS 加密的 L2 passphrase。安全修复 2.1：新凭证此处存密文，`l2_passphrase` 留空。
+        /// 旧凭证无此字段（serde default None）→ `resolve_l2_passphrase` 回退明文 `l2_passphrase` 兼容。
+        #[serde(default)]
+        encrypted_l2_passphrase: Option<String>,
+        /// L2 passphrase（明文）。新凭证置空；仅旧凭证兼容保留。读取走 `resolve_l2_passphrase`。
         l2_passphrase: String,
         /// Polymarket Builder Code（归因 + 免 gas + fee）
         builder_code: String,
@@ -233,6 +249,10 @@ pub struct Fill {
     pub filled_price: f64,
     pub tx_hash: Option<String>,
     pub fee: f64,
+    /// `true` = 仅签名未真实提交 Venue（dry-sign / dry-run 合成）。
+    /// 调用方据此**不得**记成交 / 置 filled，否则账实不符（假成交）。
+    /// 见安全修复 1.3。
+    pub dry: bool,
 }
 
 /// 订单状态。对应 `docs/VENUE_DESIGN.md` §3（状态机/部分成交）。

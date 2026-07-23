@@ -207,12 +207,12 @@ Fill → copy_execution
 | `crates/venues/polymarket/src/lib.rs` | `place_order` 路由 DepositWalletDelegated / Wallet + KMS 注入 | ✅ |
 | `crates/venues/polymarket/src/client.rs` | `derive_api_key_l1` + `update_balance_allowance(signature_type=3)` | ✅ |
 | `crates/venues/polymarket/Cargo.toml` | +hmac +sha2 +hex +sharpside-kms | ✅ |
-| `crates/kms/`（新 crate） | `Kms` trait + `DevKms`（env 明文）+ `AwsKms`（stub） | ✅ |
+| `crates/kms/`（新 crate） | `Kms` trait + `LocalKms`（生产站内签）+ `DevKms`（dev）+ `AwsKms`（远期 stub，非门禁） | ✅ |
 | `crates/db/migrations/0012_deposit_wallet.sql` | `proxy_address` 列 | ✅ |
 | `crates/db/src/queries/account.rs` | `upsert_credential_with_proxy` | ✅ |
 | `services/account/src/deposit.rs` | `/me/deposit-wallet/provision` 端点（离线/在线双模式） | ✅ |
 | `services/account/src/routes.rs` | provision 路由 | ✅ |
-| `services/copier/src/main.rs` | 启动注入 KMS（DevKms env / 生产换真 AwsKms） | ✅ |
+| `services/copier/src/main.rs` | 启动注入 KMS（生产 `LocalKms` 站内签 / dev `DevKms`） | ✅ |
 | 文档 | 本文件 + ARCHITECTURE/VENUEHUB_STORAGE/FLOWS/TECH_STACK 更新 | ✅ |
 
 ## 7. 待办（需网络/外部依赖）
@@ -248,9 +248,10 @@ Fill → copy_execution
   - [x] salt = `keccak256(abi.encode(factory, bytes32(owner)))`（对齐工厂实现）
   - [x] Polygon beacon clone 路径（`DEPOSIT_WALLET_BEACON_POLYGON=0x7a18edfe...`）+ UUPS 路径保留
   - [x] 真实链上 canary 向量验证：owner `0x7b51...1a8a` → `0xa7a8...3711`（beacon）/ `0xeb07...11e7`（UUPS）
-- [x] AWS KMS 接入（dev 路径用 env 明文）—— `crates/kms`：`DevKms` 可用，`AwsKms` stub
-  - [ ] 真 `AwsKms`：加 `aws-sdk-kms` 依赖，替换 stub 为 `client.encrypt/decrypt` 调用
-  - [ ] per-user KMS key_id 存 `account.users.kms_key_id`（未来迁移 0013）
+- [x] 站内 KMS（生产 `LocalKms` 落盘 master key；dev `DevKms` env 明文）—— `crates/kms`
+  - [x] 生产默认：`SHARPSIDE_KMS_MASTER_KEY_PATH` → LocalKms AES-256-GCM；account/copier 同钥解密后**站内签名**
+  - [~] 云 KMS（如 `AwsKms`）：**明确推迟，非上线门禁**；stub 保留插槽，暂不接亚马逊等云厂商
+  - [ ] （远期可选）per-user cloud key_id 存 `account.users.kms_key_id`（未来迁移）
 - [x] account 服务 `/me/deposit-wallet/provision` 端点 —— `services/account/src/deposit.rs`（离线模式可用，在线模式需 env + 网络）
 - [x] CLOB `update_balance_allowance(signature_type=3)` 余额同步 —— `client.rs`
   - [x] **真实联调修正**：官方 clob-client-v2 是 `GET /balance-allowance/update?asset_type=COLLATERAL&signature_type=3`（非 POST `/balance-allowance`），L2 HMAC method=GET、path=`/balance-allowance/update`。**POLY_ADDRESS = owner EOA**（L2 凭证所属地址，非 deposit wallet），`signature_type=3` 让服务端映射 owner→deposit wallet

@@ -8,8 +8,9 @@ import { Menu, Moon, Sun, X } from "lucide-react";
 import { useTheme } from "@/components/ui/ThemeProvider";
 import { LanguageSwitcher } from "@/components/shared/LanguageSwitcher";
 import { cn } from "@/lib/utils";
+import { getAppHref } from "@/lib/appUrl";
 
-const APP_HREF = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:8080";
+const APP_HREF = getAppHref();
 
 export function Navbar() {
   const pathname = usePathname();
@@ -89,12 +90,21 @@ export function Navbar() {
           >
             {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          <a
-            href={APP_HREF}
-            className="rounded-lg bg-[rgb(var(--accent))] px-4 py-2 text-sm font-semibold text-[#041018] transition hover:brightness-110"
-          >
-            {t("launchApp")}
-          </a>
+          {APP_HREF ? (
+            <a
+              href={APP_HREF}
+              className="rounded-lg bg-[rgb(var(--accent))] px-4 py-2 text-sm font-semibold text-[#041018] transition hover:brightness-110"
+            >
+              {t("launchApp")}
+            </a>
+          ) : (
+            <Link
+              href="/docs"
+              className="rounded-lg bg-[rgb(var(--accent))] px-4 py-2 text-sm font-semibold text-[#041018] transition hover:brightness-110"
+            >
+              {t("docs")}
+            </Link>
+          )}
         </div>
 
         <div className="flex items-center gap-1 md:hidden">
@@ -130,12 +140,21 @@ export function Navbar() {
             <div className="flex items-center gap-3 border-t border-[var(--glass-border)] pt-4">
               <LanguageSwitcher />
             </div>
-            <a
-              href={APP_HREF}
-              className="mt-2 block rounded-lg bg-[rgb(var(--accent))] px-3 py-2.5 text-center text-sm font-semibold text-[#041018]"
-            >
-              {t("launchApp")}
-            </a>
+            {APP_HREF ? (
+              <a
+                href={APP_HREF}
+                className="mt-2 block rounded-lg bg-[rgb(var(--accent))] px-3 py-2.5 text-center text-sm font-semibold text-[#041018]"
+              >
+                {t("launchApp")}
+              </a>
+            ) : (
+              <Link
+                href="/docs"
+                className="mt-2 block rounded-lg bg-[rgb(var(--accent))] px-3 py-2.5 text-center text-sm font-semibold text-[#041018]"
+              >
+                {t("docs")}
+              </Link>
+            )}
           </div>
         </div>
       )}

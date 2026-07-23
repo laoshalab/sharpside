@@ -2,7 +2,7 @@
 import { el } from '../components/ui.js';
 import { discoverWallets, connect, personalSign, buildSiwe } from './siwe.js';
 import { me, walletNonce, walletLogin } from './account.js';
-import { setToken, setUser } from '../store/auth.js';
+import { setUser } from '../store/auth.js';
 import { toast } from '../store/toast.js';
 import { navigate } from '../router.js';
 import { t } from '../i18n/index.js';
@@ -101,11 +101,11 @@ export async function connectWalletFlow({ redirect = '/dashboard' } = {}) {
   if (!wallet) return false;
 
   const [address] = await connect(wallet);
-  const { nonce, domain, chain_id, issued_at } = await walletNonce(address);
+  const { nonce, domain, uri, chain_id, issued_at } = await walletNonce(address);
   const message = buildSiwe({
     domain,
     address,
-    uri: location.origin,
+    uri: uri || location.origin,
     chainId: chain_id,
     nonce,
     issuedAt: issued_at,
@@ -113,8 +113,8 @@ export async function connectWalletFlow({ redirect = '/dashboard' } = {}) {
   });
   const signature = await personalSign(wallet, message, address);
   const r = await walletLogin({ message, signature });
-  setToken(r.token);
-  try { setUser(await me()); } catch {}
+  // 安全修复 3.1：token 由后端写 HttpOnly cookie，前端不持有；仅缓存非密 user。
+  try { setUser(r.user || (await me())); } catch {}
   toast(t('walletConnect.connected'), 'success');
   if (redirect) navigate(redirect);
   return true;

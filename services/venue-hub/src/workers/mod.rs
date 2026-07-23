@@ -15,7 +15,9 @@ pub mod mapping;
 pub mod official_pnl;
 pub mod perf;
 pub mod shadow;
+pub mod signal_emit;
 pub mod signal_replay;
+pub mod trade_watch;
 
 /// 启动全部 worker，返回 JoinSet 供 main 持有（任一 worker panic 会被观测）。
 pub fn spawn_all(state: AppState) -> JoinSet<()> {
@@ -35,6 +37,8 @@ pub fn spawn_all(state: AppState) -> JoinSet<()> {
     set.spawn(async move { official_pnl::run(s).await });
     let s = state.clone();
     set.spawn(async move { hot::run(s).await });
+    let s = state.clone();
+    set.spawn(async move { trade_watch::run(s).await });
     let s = state.clone();
     set.spawn(async move { signal_replay::run(s).await });
     let s = state.clone();

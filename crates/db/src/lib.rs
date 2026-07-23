@@ -26,10 +26,10 @@ use sqlx::PgPool;
 
 pub use error::DbError;
 pub use models::{
-    CopyExecution, CopyOrderRow, EquityCurveBatchRow, EquityCurvePoint, FollowRelation, HotWallet,
-    Identity, LeaderboardRow, MarketMapping, PositionRow, PositionSnapshot, RawMarket, RawTrade,
-    Redemption, Trader, TraderPerformance, User, UserVenueCredential, UserWallet, Watchlist,
-    Withdrawal,
+    BillingInvoice, BillingPayment, CopyExecution, CopyOrderRow, CredentialArchive,
+    EquityCurveBatchRow, EquityCurvePoint, FollowRelation, HotWallet, Identity, LeaderboardRow,
+    MarketMapping, PositionRow, PositionSnapshot, RawMarket, RawTrade, Redemption, Trader,
+    TraderPerformance, User, UserVenueCredential, UserWallet, Watchlist, Withdrawal,
 };
 
 /// 连接 PostgreSQL 并配置连接池。
@@ -71,7 +71,7 @@ pub async fn ping(pool: &PgPool) -> Result<(), DbError> {
 /// 新增迁移时在此追加一行 `include_str!`。
 fn build_migrations() -> Vec<Migration> {
     // (version, description, sql)
-    const SOURCES: [(i64, &str, &str); 34] = [
+    const SOURCES: [(i64, &str, &str); 43] = [
         (
             1,
             "create_schemas",
@@ -222,6 +222,51 @@ fn build_migrations() -> Vec<Migration> {
             "copy_order_idempotency",
             include_str!("../migrations/0034_copy_order_idempotency.sql"),
         ),
+        (
+            35,
+            "jwt_denylist",
+            include_str!("../migrations/0035_jwt_denylist.sql"),
+        ),
+        (
+            36,
+            "copy_execution_unique",
+            include_str!("../migrations/0036_copy_execution_unique.sql"),
+        ),
+        (
+            37,
+            "credential_passphrase_enc",
+            include_str!("../migrations/0037_credential_passphrase_enc.sql"),
+        ),
+        (
+            38,
+            "credential_revoked",
+            include_str!("../migrations/0038_credential_revoked.sql"),
+        ),
+        (
+            39,
+            "credential_archives",
+            include_str!("../migrations/0039_credential_archives.sql"),
+        ),
+        (
+            40,
+            "billing",
+            include_str!("../migrations/0040_billing.sql"),
+        ),
+        (
+            41,
+            "redemptions_deposit_wallet",
+            include_str!("../migrations/0041_redemptions_deposit_wallet.sql"),
+        ),
+        (
+            42,
+            "copy_status_submitted",
+            include_str!("../migrations/0042_copy_status_submitted.sql"),
+        ),
+        (
+            43,
+            "signal_ledger_trades_index",
+            include_str!("../migrations/0043_signal_ledger_trades_index.sql"),
+        ),
     ];
 
     SOURCES
@@ -245,7 +290,7 @@ mod tests {
     #[test]
     fn build_migrations_has_ten_in_order() {
         let migrations = build_migrations();
-        assert_eq!(migrations.len(), 34, "迁移数量应为 34");
+        assert_eq!(migrations.len(), 43, "迁移数量应为 43");
         for w in migrations.windows(2) {
             assert!(
                 w[0].version < w[1].version,

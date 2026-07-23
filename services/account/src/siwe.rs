@@ -3,10 +3,11 @@
 //! 仅做 EOA EIP-191 验签：用 `signinwithethereum` crate（不启用 alloy feature，
 //! 自带 k256/sha3 做 ecrecover，与本项目 alloy 栈解耦，避免版本冲突）。
 //!
-//! 校验项：domain 绑定（防钓鱼）、chainId 白名单、时间有效（valid_at）、
-//! issued_at 新鲜度（防陈旧重放）、EIP-191 验签（crate 内部已比对恢复地址 == msg.address，
-//! 不符返回 `VerificationError::Signer`）。
+//! 校验项：domain 绑定（防钓鱼）、URI 白名单（防同域跨页签名）、chainId 白名单、
+//! 时间有效（valid_at）、issued_at 新鲜度（防陈旧重放）、EIP-191 验签
+//!（crate 内部已比对恢复地址 == msg.address，不符返回 `VerificationError::Signer`）。
 
+use crate::config::normalize_uri;
 use crate::error::ApiError;
 use hex::FromHex;
 use signinwithethereum::Message;
@@ -20,6 +21,7 @@ pub fn verify_and_validate(
     message_text: &str,
     signature_hex: &str,
     expected_domain: &str,
+    allowed_uris: &[String],
     allowed_chains: &[u64],
     max_age_secs: i64,
 ) -> Result<Message, ApiError> {
@@ -33,6 +35,13 @@ pub fn verify_and_validate(
     // domain 绑定（防钓鱼跨站签名）
     if msg.domain.as_str() != expected_domain {
         return Err(ApiError::Unauthorized("siwe domain mismatch".into()));
+    }
+    // URI 白名单（防同域跨页/错误 origin 签名）
+    let uri = normalize_uri(msg.uri.as_str());
+    if allowed_uris.is_empty() || !allowed_uris.iter().any(|u| u == &uri) {
+        return Err(ApiError::Unauthorized(format!(
+            "siwe uri not allowed: {uri}"
+        )));
     }
     // chainId 白名单
     if !allowed_chains.contains(&msg.chain_id) {
@@ -77,6 +86,14 @@ mod tests {
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
 
+    fn allowed_uris(domain: &str) -> Vec<String> {
+        vec![
+            format!("https://{domain}"),
+            format!("http://{domain}"),
+            format!("http://{domain}:8070"),
+        ]
+    }
+
     /// 构造一条合法 SIWE 消息文本（EIP-4361 格式）。
     fn build_siwe(
         domain: &str,
@@ -117,7 +134,14 @@ mod tests {
         let sig = signer.sign_hash_sync(&digest).unwrap();
         let sig_hex = format!("0x{}", hex::encode(sig.as_bytes()));
 
-        let verified = verify_and_validate(&msg_text, &sig_hex, "localhost", &[137, 1], 300);
+        let verified = verify_and_validate(
+            &msg_text,
+            &sig_hex,
+            "localhost",
+            &allowed_uris("localhost"),
+            &[137, 1],
+            300,
+        );
         assert!(
             verified.is_ok(),
             "valid signature should verify: {:?}",
@@ -145,7 +169,15 @@ mod tests {
 
         // 篡改 nonce
         let tampered = msg_text.replace("n1", "n2");
-        assert!(verify_and_validate(&tampered, &sig_hex, "localhost", &[137, 1], 300).is_err());
+        assert!(verify_and_validate(
+            &tampered,
+            &sig_hex,
+            "localhost",
+            &allowed_uris("localhost"),
+            &[137, 1],
+            300
+        )
+        .is_err());
     }
 
     #[test]
@@ -164,7 +196,54 @@ mod tests {
         let sig = signer.sign_hash_sync(&digest).unwrap();
         let sig_hex = format!("0x{}", hex::encode(sig.as_bytes()));
         // 期望 domain=localhost，消息 domain=evil.com → 拒绝
-        assert!(verify_and_validate(&msg_text, &sig_hex, "localhost", &[137, 1], 300).is_err());
+        assert!(verify_and_validate(
+            &msg_text,
+            &sig_hex,
+            "localhost",
+            &allowed_uris("localhost"),
+            &[137, 1],
+            300
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn verify_rejects_uri_not_in_allowlist() {
+        let signer = PrivateKeySigner::random();
+        let address = signer.address();
+        let now = OffsetDateTime::now_utc();
+        let issued = now
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let exp = (now + time::Duration::minutes(5))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let msg_text = format!(
+            "localhost wants you to sign in with your Ethereum account:\n{address}\n\n\
+             Sign in to Sharpside\n\n\
+             URI: https://evil.example/phish\n\
+             Version: 1\n\
+             Chain ID: 137\n\
+             Nonce: nuri0001\n\
+             Issued At: {issued}\n\
+             Expiration Time: {exp}"
+        );
+        let digest = alloy_primitives::utils::eip191_hash_message(msg_text.as_bytes());
+        let sig = signer.sign_hash_sync(&digest).unwrap();
+        let sig_hex = format!("0x{}", hex::encode(sig.as_bytes()));
+        let err = verify_and_validate(
+            &msg_text,
+            &sig_hex,
+            "localhost",
+            &allowed_uris("localhost"),
+            &[137, 1],
+            300,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("uri not allowed"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -187,6 +266,14 @@ mod tests {
         let digest = alloy_primitives::utils::eip191_hash_message(msg_text.as_bytes());
         let sig = signer.sign_hash_sync(&digest).unwrap();
         let sig_hex = format!("0x{}", hex::encode(sig.as_bytes()));
-        assert!(verify_and_validate(&msg_text, &sig_hex, "localhost", &[137, 1], 300).is_err());
+        assert!(verify_and_validate(
+            &msg_text,
+            &sig_hex,
+            "localhost",
+            &allowed_uris("localhost"),
+            &[137, 1],
+            300
+        )
+        .is_err());
     }
 }

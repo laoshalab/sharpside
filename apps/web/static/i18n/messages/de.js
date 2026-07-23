@@ -519,6 +519,8 @@ export default {
     "dataPoints": "{count} Punkte · {start} → {end}",
     "positionsTitle": "Offene Positionen",
     "positionsEmpty": "Keine offenen Positionen",
+    "colMarket": "Markt",
+    "colOutcome": "Seite",
     "colSize": "Größe",
     "colAvgCost": "Ø-Kosten",
     "colOpenedAt": "Eröffnet",

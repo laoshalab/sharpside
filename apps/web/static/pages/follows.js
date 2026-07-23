@@ -7,8 +7,9 @@ import { listIdentities, listVenues } from '../lib/venue-hub.js';
 import { openFollowFormModal } from '../components/follow-form.js';
 import { copyHistorySection } from './copy-history.js';
 import { toast } from '../store/toast.js';
-import { navigate } from '../router.js';
+import { navigate, remount } from '../router.js';
 import { t } from '../i18n/index.js';
+import { copyText } from '../lib/clipboard.js';
 
 const FREE_SLOTS = 3; // Free 档槽位上限（§6.12）；Pro+ 无限。
 
@@ -82,7 +83,7 @@ function renderList({ list, follows, user, filterBar }) {
     return;
   }
   const wrap = el('div', { class: 'follow-list' });
-  for (const f of rows) wrap.appendChild(followCard(f, () => followsPage().then(mount)));
+  for (const f of rows) wrap.appendChild(followCard(f, () => remount()));
   list.appendChild(wrap);
   // 槽位占用按 active 跟随计（暂停项不占槽），与当前筛选无关。
   const activeCount = (follows || []).filter(f => f.active).length;
@@ -103,9 +104,14 @@ function followCard(f, reload) {
     : traderLabel({ alias: f.follow_alias, address: f.follow_address, x_username: f.follow_x_username });
   const platform = f.follow_platform || '—';
   const statusCls = f.active ? 'active' : 'paused';
-  const statusTxt = f.active ? '✅ active' : '⏸ paused';
+  const statusTxt = f.active ? t('follows.statusActive') : t('follows.statusPaused');
+  const targetHref = f.follow_identity_id
+    ? `#/identities/${encodeURIComponent(f.follow_identity_id)}`
+    : (f.follow_platform && f.follow_address
+      ? `#/traders/${encodeURIComponent(f.follow_platform)}/${encodeURIComponent(f.follow_address)}`
+      : '#/follows');
   card.appendChild(el('div', { class: 'fc-head' }, [
-    el('div', { class: 'fc-title' }, [el('a', { href: f.follow_platform && f.follow_address ? `#/traders/${encodeURIComponent(f.follow_platform)}/${encodeURIComponent(f.follow_address)}` : '#/follows', text: `${target} · ${platform}` })]),
+    el('div', { class: 'fc-title' }, [el('a', { href: targetHref, text: `${target} · ${platform}` })]),
     el('span', { class: 'badge ' + statusCls, text: statusTxt }),
   ]));
   card.appendChild(el('div', { class: 'fc-meta' }, [
@@ -127,7 +133,7 @@ function followCard(f, reload) {
   actions.appendChild(el('button', { class: 'sm', text: t('follows.edit'), onclick: () => openFollowFormModal({ follow: f, onSaved: async (body) => {
     await updateFollow(f.id, body); toast(t('follows.toastUpdated'), 'success'); reload();
   } }) }));
-  actions.appendChild(el('button', { class: 'sm', text: t('follows.copyId'), onclick: () => { navigator.clipboard?.writeText(f.id); toast(t('follows.toastIdCopied'), 'success'); } }));
+  actions.appendChild(el('button', { class: 'sm', text: t('follows.copyId'), onclick: () => copyText(f.id) }));
   actions.appendChild(el('div', { class: 'spacer' }));
   actions.appendChild(el('button', { class: 'sm danger', text: t('follows.delete'), onclick: async () => {
     if (!confirm(t('follows.confirmDelete'))) return;
@@ -139,7 +145,8 @@ function followCard(f, reload) {
 }
 
 function slotBar(used, user) {
-  const isPro = user?.tier && user.tier !== 'free';
+  const tier = String(user?.subscription_tier || user?.tier || 'free').toLowerCase();
+  const isPro = tier === 'pro_plus' || (tier && tier !== 'free');
   const limit = isPro ? Infinity : FREE_SLOTS;
   const bar = el('div', { class: 'slot-bar' });
   if (isPro) {
@@ -207,14 +214,16 @@ export async function newFollowPage({ params }) {
   c.appendChild(traderPanel);
   c.appendChild(identityPanel);
   identityPanel.style.display = 'none';
-  // 预填 ?identity_id= 时自动切到跨 Venue 身份
+  // 预填 ?identity_id= 时自动切到跨 Venue 身份。
+  // 用 tabs.querySelector：此时 c 尚未挂到 document，document.querySelector 会拿到 null。
   if (q.identity_id) {
-    document.querySelector('input[name=target_type][value=identity]').checked = true;
+    const idRadio = tabs.querySelector('input[name=target_type][value=identity]');
+    if (idRadio) idRadio.checked = true;
     traderPanel.style.display = 'none';
     identityPanel.style.display = '';
   }
   tabs.querySelectorAll('input[name=target_type]').forEach(r => r.onchange = () => {
-    const isId = document.querySelector('input[name=target_type]:checked').value === 'identity';
+    const isId = tabs.querySelector('input[name=target_type]:checked')?.value === 'identity';
     traderPanel.style.display = isId ? 'none' : '';
     identityPanel.style.display = isId ? '' : 'none';
   });
@@ -244,8 +253,16 @@ export async function newFollowPage({ params }) {
   c.appendChild(el('h3', { text: t('follows.execConfig') }));
   const venueF = field(t('follows.executeVenue'), el('input', { id: 'venue', value: q.platform || 'polymarket' }));
   const channelF = field(t('follows.channel'), selectEl('channel', [['tg', t('follows.channelTgOpt')], ['daemon', t('follows.channelDaemonOpt')]], 'tg'));
-  const sizingModeF = field('sizing mode', selectEl('sizing_mode', [['fixed', t('follows.sizingFixed')], ['proportional', t('follows.sizingProportional')]], 'fixed'));
-  const sizingValF = field(t('followForm.sizingValue'), el('input', { id: 'sizing_value', type: 'number', step: '0.01', min: '0', value: '10' }));
+  const sizingModeSel = selectEl('sizing_mode', [['fixed', t('follows.sizingFixed')], ['proportional', t('follows.sizingProportional')]], 'fixed');
+  const sizingValInput = el('input', { id: 'sizing_value', type: 'number', step: '0.01', min: '0', value: '10' });
+  sizingModeSel.onchange = () => {
+    const mode = sizingModeSel.value;
+    const cur = Number(sizingValInput.value);
+    if (mode === 'proportional' && (!(cur > 0) || cur > 1)) sizingValInput.value = '0.5';
+    if (mode === 'fixed' && (!(cur > 0) || cur <= 1)) sizingValInput.value = '10';
+  };
+  const sizingModeF = field(t('followForm.sizingMode'), sizingModeSel);
+  const sizingValF = field(t('followForm.sizingValue'), sizingValInput);
   const sameVenueF = field('', el('label', {}, [el('input', { id: 'same_venue_only', type: 'checkbox', checked: 'checked' }), t('follows.sameVenueOnly')]));
   [venueF, channelF, sizingModeF, sizingValF, sameVenueF].forEach(n => c.appendChild(n));
 
@@ -266,12 +283,16 @@ export async function newFollowPage({ params }) {
 
   async function submit() {
     errP.textContent = '';
-    const isId = document.querySelector('input[name=target_type]:checked').value === 'identity';
+    const isId = tabs.querySelector('input[name=target_type]:checked')?.value === 'identity';
     const venue = val('venue') || val('platform');
     const channel = document.getElementById('channel').value;
     const mode = document.getElementById('sizing_mode').value;
     const sv = Number(document.getElementById('sizing_value').value || 0);
     if (!(sv > 0)) { errP.textContent = t('follows.errorSizing'); return; }
+    if (mode === 'proportional' && !(sv > 0 && sv <= 1)) {
+      errP.textContent = t('followForm.errorProportional');
+      return;
+    }
     const sizingValue = mode === 'fixed' ? { amount: sv } : mode === 'proportional' ? { ratio: sv } : { pct: sv };
     const config = {
       sizing: { mode, value: sizingValue },
@@ -302,7 +323,6 @@ export async function newFollowPage({ params }) {
 
 function numOr0(id) { const v = Number(document.getElementById(id)?.value || ''); return Number.isFinite(v) && v > 0 ? v : 0; }
 function intOr0(id) { const v = parseInt(document.getElementById(id)?.value || '', 10); return Number.isFinite(v) && v > 0 ? v : 0; }
-function mount(node) { const app = document.getElementById('app'); app.innerHTML = ''; app.appendChild(node); }
 function parseHashQuery() { const h = location.hash.slice(1); const i = h.indexOf('?'); return i < 0 ? {} : Object.fromEntries(new URLSearchParams(h.slice(i + 1))); }
 function val(id) { return document.getElementById(id).value.trim(); }
 function field(label, child) { const w = el('div', { class: 'field' }); if (label) w.appendChild(el('label', { text: label })); w.appendChild(child); return w; }

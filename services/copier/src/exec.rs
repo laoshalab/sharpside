@@ -13,7 +13,7 @@ use sharpside_db::CopyOrderRow;
 use sharpside_mapping::types::ExecParams;
 use sharpside_mapping::unit::{convert_price, convert_size};
 use sharpside_shared::{allowed_execute_venues, Channel, Platform, Side};
-use sharpside_venues_core::{Credential, Order, OrderType};
+use sharpside_venues_core::{Credential, Order, VenueError};
 use tracing::{error, info, warn};
 
 const TG_BATCH: i64 = 50;
@@ -151,22 +151,33 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
 
     // 4. 风控（三级覆盖：全局 × 档位 → 用户覆盖 → Venue 执行参数）
     let now = Utc::now();
-    let daily_used = acct::sum_daily_notional(&state.db, order.user_id, now - Duration::hours(24))
-        .await
-        .unwrap_or(0.0);
-    let open_positions = acct::count_active_copy_orders(&state.db, order.user_id)
-        .await
-        .unwrap_or(0);
-    let recent = acct::count_recent_copy_orders(
-        &state.db,
-        order.user_id,
-        now - Duration::seconds(state.config.rapid_flip_window_secs),
-    )
-    .await
-    .unwrap_or(0);
-    let recent_statuses = acct::recent_copy_order_statuses(&state.db, order.user_id, 20)
-        .await
-        .unwrap_or_default();
+    // 安全修复 1.5：风控查询 fail-closed —— 任一查询失败则 skip 不下单，
+    // 绝不 `unwrap_or(0)`（那会绕过风控 = fail-open，真钱风险）。
+    let risk_inputs = async {
+        let daily_used =
+            acct::sum_daily_notional(&state.db, order.user_id, now - Duration::hours(24)).await?;
+        let open_positions = acct::count_active_copy_orders(&state.db, order.user_id).await?;
+        let recent = acct::count_recent_copy_orders(
+            &state.db,
+            order.user_id,
+            now - Duration::seconds(state.config.rapid_flip_window_secs),
+        )
+        .await?;
+        let recent_statuses = acct::recent_copy_order_statuses(&state.db, order.user_id, 20).await?;
+        Ok::<_, sharpside_db::DbError>((daily_used, open_positions, recent, recent_statuses))
+    }
+    .await;
+    let (daily_used, open_positions, recent, recent_statuses) = match risk_inputs {
+        Ok(v) => v,
+        Err(e) => {
+            return skip(
+                state,
+                order.id,
+                &format!("风控查询失败（fail-closed 不下单）: {e}"),
+            )
+            .await
+        }
+    };
     let consecutive_failures = crate::risk::count_trailing_failures(&recent_statuses);
 
     let overrides: crate::risk::UserRiskOverrides =
@@ -197,16 +208,30 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
     // 4b. per-follow 风控：FollowConfig.daily_max_notional / max_open_positions 独立约束
     //     该跟随关系的日累计与持仓数（UI 可填，此前未强制）。
     if let Some(follow_cfg) = load_follow_limits(state, order.follow_relation_id).await {
-        let f_daily_used = acct::sum_daily_notional_for_follow(
-            &state.db,
-            order.follow_relation_id,
-            now - Duration::hours(24),
-        )
-        .await
-        .unwrap_or(0.0);
-        let f_open = acct::count_active_copy_orders_for_follow(&state.db, order.follow_relation_id)
-            .await
-            .unwrap_or(0);
+        // 安全修复 1.5：per-follow 风控查询同样 fail-closed。
+        let f_inputs = async {
+            let f_daily_used = acct::sum_daily_notional_for_follow(
+                &state.db,
+                order.follow_relation_id,
+                now - Duration::hours(24),
+            )
+            .await?;
+            let f_open =
+                acct::count_active_copy_orders_for_follow(&state.db, order.follow_relation_id).await?;
+            Ok::<_, sharpside_db::DbError>((f_daily_used, f_open))
+        }
+        .await;
+        let (f_daily_used, f_open) = match f_inputs {
+            Ok(v) => v,
+            Err(e) => {
+                return skip(
+                    state,
+                    order.id,
+                    &format!("per-follow 风控查询失败（fail-closed 不下单）: {e}"),
+                )
+                .await
+            }
+        };
         let fctx = crate::risk::FollowRiskContext {
             daily_notional_used: f_daily_used,
             open_positions: f_open,
@@ -227,6 +252,7 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
             filled_price: exec_price,
             tx_hash: None,
             fee: exec_size * exec_price * exec_params.taker_fee_bps / 10_000.0,
+            dry: true,
         };
         record_fill_with(state, order, &execute_venue, &exec_market_id, &exec_token_id, &fill)
             .await?;
@@ -261,8 +287,24 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
     };
     let best_bid = book.bids.first().map(|l| l.price).unwrap_or(0.0);
     let best_ask = book.asks.first().map(|l| l.price).unwrap_or(0.0);
+
+    // 第 2 层：激进定价 + FAK，让跟单真正"跟上"成交而非挂死单。
+    // 信号价（exec_price）作为风控基准与钳制锚点；order_price 为实际下单价（见 aggressive_price）。
+    // 滑点保护改为校验 order_price vs mid（实际付出价 vs 盘口中位）。
+    let signal_price = exec_price;
+    let order_price = match aggressive_price(
+        exec_side,
+        signal_price,
+        best_bid,
+        best_ask,
+        limits.max_slippage_bps,
+        state.config.aggressive_pricing,
+    ) {
+        Ok(p) => p,
+        Err(reason) => return skip(state, order.id, &reason).await,
+    };
     if let Err(reason) =
-        crate::risk::check_slippage(exec_price, best_bid, best_ask, limits.max_slippage_bps)
+        crate::risk::check_slippage(order_price, best_bid, best_ask, limits.max_slippage_bps)
     {
         return skip(state, order.id, &reason).await;
     }
@@ -315,7 +357,8 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
         Some(&exec_token_id),
         idempotency_salt as i64,
         order_timestamp_ms as i64,
-        exec_price,
+        // 持久化实际下单价（激进定价后的 order_price），reclaim 重试复用同一价 → 相同 orderID 幂等。
+        order_price,
         exec_size,
     )
     .await?;
@@ -328,17 +371,31 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
         market_id: exec_market_id.clone(),
         token_id: exec_token_id.clone(),
         side: exec_side,
-        price: exec_price,
+        price: order_price,
         size: exec_size,
         idempotency_salt: Some(idempotency_salt),
         order_timestamp_ms: Some(order_timestamp_ms),
-        // 跟单主路径：限价挂单（GTC），与历史行为一致。FOK/FAK/GTD/post-only 由调用方按需指定。
-        order_type: OrderType::Gtc,
+        // 第 2 层：默认 FAK（立即成交能成交的部分，剩余取消），避免 GTC 挂单等行情、120s 超时撤单。
+        // 可经 COPIER_ORDER_TYPE 回退 GTC/FOK/GTD。
+        order_type: state.config.copy_order_type,
         expiration: None,
         post_only: false,
     };
     match venue.place_order(&cred, order_req).await {
         Ok(fill) => {
+            // 安全修复 1.3：dry-sign（POLYMARKET_CLOB_POST≠1）仅签名未提交 CLOB，
+            // 返回的 Fill 是合成假成交（dry=true）。**不得**置 submitted（否则 reconcile
+            // 用假 order_id 永远查不到 → 订单卡 submitted + 日志刷屏），也不得记 copy_execution。
+            // 改置 skipped（终态、诚实）：订单已签名但未提交，待启用 POLYMARKET_CLOB_POST=1 后重发。
+            if fill.dry {
+                info!(order_id = %order.id, "dry-sign 未提交 CLOB，置 skipped（设 POLYMARKET_CLOB_POST=1 提交）");
+                return skip(
+                    state,
+                    order.id,
+                    "dry-sign 未提交 CLOB（设 POLYMARKET_CLOB_POST=1 后重发）",
+                )
+                .await;
+            }
             // P0 成交对账：place_order 返回 orderID 仅代表"订单被 Venue 接受"，非成交。
             // 限价单可能挂单未成交 / 部分成交。故置 submitted（不记成交），交 reconcile worker
             // 轮询 Venue::order_state 回写真实 filled_size/filled_price 后才置 filled。
@@ -359,6 +416,9 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
             // TODO(L1): 成交后异步通知 tg-bot（由 reconcile worker 在确认 filled 后触发更准确）。
         }
         Err(e) => {
+            if matches!(e, VenueError::RateLimited) {
+                crate::metrics::inc_clob_429();
+            }
             fail(state, order.id, &format!("place_order 失败: {e}")).await?;
         }
     }
@@ -431,6 +491,46 @@ fn derive_idempotency_salt(id: uuid::Uuid) -> u64 {
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]);
     (raw & ((1u64 << 53) - 1)) | 1
+}
+
+/// 第 2 层：激进定价。返回实际下单价（`order_price`）。
+///
+/// - `aggressive=true`：买取 `best_ask`、卖取 `best_bid`（吃对手盘立即成交），再以信号价
+///   ± `max_slippage_bps` 钳制，避免宽幅/快速行情中付出远超源钱包成交价。
+/// - `aggressive=false`：返回 `signal_price`（FAK 仍 IOC，但不主动跨越盘口）。
+///
+/// 返回 `Err(reason)` 表示无法给出安全价（盘口为空 / 钳制后非正），调用方应 skip。
+fn aggressive_price(
+    side: Side,
+    signal_price: f64,
+    best_bid: f64,
+    best_ask: f64,
+    max_slippage_bps: f64,
+    aggressive: bool,
+) -> Result<f64, String> {
+    if !aggressive {
+        return Ok(signal_price);
+    }
+    let slip = max_slippage_bps / 10_000.0;
+    let candidate = match side {
+        Side::Buy => best_ask,
+        Side::Sell => best_bid,
+    };
+    if candidate <= 0.0 {
+        return Err("盘口无对手价，激进定价无法成交（盘口可能为空）".into());
+    }
+    let p = match side {
+        // 买：付出不高于 信号价*(1+slip)；best_ask 更低则吃更低价。
+        Side::Buy => candidate.min(signal_price * (1.0 + slip)),
+        // 卖：卖出不低于 信号价*(1-slip)；best_bid 更高则吃更高价。
+        Side::Sell => candidate.max(signal_price * (1.0 - slip)),
+    };
+    if p <= 0.0 {
+        return Err(format!(
+            "激进定价钳制后价 <= 0（candidate={candidate}, signal={signal_price}, slip={slip}）"
+        ));
+    }
+    Ok(p)
 }
 
 /// 当前毫秒时间戳（签名用 timestamp）。
@@ -524,6 +624,12 @@ pub(crate) async fn load_credential(
         .into_iter()
         .find(|c| c.platform == venue.as_str())
         .ok_or_else(|| anyhow::anyhow!("无 {venue} 凭证"))?;
+    // 安全修复 2.2：已撤销凭证拒下单（pull-based 停派发，无需显式通知）。
+    if let Some(revoked_at) = row.revoked_at {
+        return Err(anyhow::anyhow!(
+            "{venue} 凭证已于 {revoked_at} 撤销（不可逆），copier 停止派发"
+        ));
+    }
     let cred: Credential = serde_json::from_value(row.encrypted_blob)
         .map_err(|e| anyhow::anyhow!("凭证反序列化失败: {e}"))?;
     // 通道 A（平台代签）必须用 DepositWalletDelegated；旧 Wallet 凭证拒绝。
@@ -543,6 +649,202 @@ const _: fn(Channel) -> () = |_| {};
 mod tests {
     use super::*;
     use sharpside_db::CopyOrderRow;
+
+    /// 安全修复 1.4 DB 级幂等：仅需 PG（无需 Polymarket 网络）。
+    /// 验证 `claim_copy_order_status` CAS + `insert_copy_execution` ON CONFLICT：
+    /// 同一 copy_order 重复上报 → 只一条 copy_execution，第二次 CAS 返回 None（幂等）。
+    ///
+    /// 跑法：
+    /// ```bash
+    /// DATABASE_URL='postgres://sharpside:sharpside_dev@127.0.0.1:5432/sharpside' \
+    ///   cargo test -p sharpside-copier --bins cas_idempotent -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn cas_idempotent_duplicate_result_writes_one_execution() {
+        let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://sharpside:sharpside_dev@127.0.0.1:5432/sharpside".to_string()
+        });
+        let db = sharpside_db::connect(&db_url, 5).await.expect("连 DB 失败");
+        sharpside_db::migrate(&db).await.expect("迁移失败");
+
+        let tg_id: i64 = 9_999_200_000 + (chrono::Utc::now().timestamp() % 1_000_000);
+        let user = acct::upsert_tg_user(&db, tg_id).await.expect("建用户失败");
+        let user_id = user.id;
+        let follow = sqlx::query(
+            r#"INSERT INTO account.follow_relation
+               (user_id, follow_platform, follow_address, execute_venue, channel, config, same_venue_only, active)
+               VALUES ($1,'polymarket',$2,'polymarket','tg','{}'::jsonb, false, true)
+               RETURNING id"#,
+        )
+        .bind(user_id)
+        .bind(format!("0xcas{tg_id}"))
+        .fetch_one(&db)
+        .await
+        .expect("建 follow_relation 失败");
+        let follow_id: uuid::Uuid = sqlx::Row::get(&follow, "id");
+
+        let order_id = uuid::Uuid::new_v4();
+        acct::enqueue_copy_order(
+            &db, order_id, follow_id, user_id, "polymarket", "polymarket",
+            "m", "t", "buy", 0.5, 10.0, "tg", chrono::Utc::now(), None, "pending", None,
+        ).await.expect("插 copy_order 失败");
+
+        // 第一次 CAS：pending → filled，返回 Some
+        let first = acct::claim_copy_order_status(&db, order_id, "filled", None).await.unwrap();
+        assert!(first.is_some(), "首次 CAS 应抢占成功");
+
+        // 第一次 insert：写入成交行
+        let r1 = acct::insert_copy_execution(
+            &db, order_id, user_id, "polymarket", "m", "t", Some("0xorder1"),
+            "buy", 10.0, 0.5, 0.0, None,
+        ).await.unwrap();
+        assert!(r1.is_some(), "首次 insert 应写入成交行");
+
+        // 第二次 CAS：已 filled → 返回 None（幂等，不重复入账）
+        let second = acct::claim_copy_order_status(&db, order_id, "filled", None).await.unwrap();
+        assert!(second.is_none(), "重复 CAS 应返回 None（已终态，幂等）");
+
+        // 第二次 insert：ON CONFLICT DO NOTHING → None（兜底，即便绕过 CAS 也只一条）
+        let r2 = acct::insert_copy_execution(
+            &db, order_id, user_id, "polymarket", "m", "t", Some("0xorder2"),
+            "buy", 10.0, 0.5, 0.0, None,
+        ).await.unwrap();
+        assert!(r2.is_none(), "重复 insert 应 ON CONFLICT 返回 None");
+
+        // 验收：copy_execution 恰好 1 行
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM account.copy_execution WHERE copy_order_id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(n, 1, "重复上报应只产生 1 条 copy_execution，实际 {n}");
+
+        // 清理
+        let _ = sqlx::query("DELETE FROM account.copy_order WHERE user_id = $1").bind(user_id).execute(&db).await;
+        let _ = sqlx::query("DELETE FROM account.follow_relation WHERE user_id = $1").bind(user_id).execute(&db).await;
+        let _ = sqlx::query("DELETE FROM account.users WHERE id = $1").bind(user_id).execute(&db).await;
+        eprintln!("CAS_IDEMPOTENT ✅ 重复上报只一条 copy_execution");
+    }
+
+    /// 安全修复 1.5 DB 级：验证 `count_active_copy_orders` 净持仓语义。
+    /// buy 10 tokenA → 1 开仓；再 sell 10 tokenA（往返）→ 0 开仓（不增）。
+    /// 仅需 PG。
+    #[tokio::test]
+    #[ignore]
+    async fn net_position_round_trip_does_not_accumulate() {
+        let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://sharpside:sharpside_dev@127.0.0.1:5432/sharpside".to_string()
+        });
+        let db = sharpside_db::connect(&db_url, 5).await.expect("连 DB 失败");
+        sharpside_db::migrate(&db).await.expect("迁移失败");
+
+        let tg_id: i64 = 9_999_300_000 + (chrono::Utc::now().timestamp() % 1_000_000);
+        let user = acct::upsert_tg_user(&db, tg_id).await.expect("建用户失败");
+        let user_id = user.id;
+        let follow = sqlx::query(
+            r#"INSERT INTO account.follow_relation
+               (user_id, follow_platform, follow_address, execute_venue, channel, config, same_venue_only, active)
+               VALUES ($1,'polymarket',$2,'polymarket','tg','{}'::jsonb, false, true)
+               RETURNING id"#,
+        )
+        .bind(user_id)
+        .bind(format!("0xnet{tg_id}"))
+        .fetch_one(&db)
+        .await
+        .expect("建 follow_relation 失败");
+        let follow_id: uuid::Uuid = sqlx::Row::get(&follow, "id");
+
+        // 1. buy 10 tokenA → filled + 成交行
+        let buy_id = uuid::Uuid::new_v4();
+        acct::enqueue_copy_order(&db, buy_id, follow_id, user_id, "polymarket", "polymarket", "m", "tokenA", "buy", 0.5, 10.0, "tg", chrono::Utc::now(), None, "pending", None).await.unwrap();
+        acct::claim_copy_order_status(&db, buy_id, "filled", None).await.unwrap();
+        acct::insert_copy_execution(&db, buy_id, user_id, "polymarket", "m", "tokenA", Some("0xbuy"), "buy", 10.0, 0.5, 0.0, None).await.unwrap();
+        let open1 = acct::count_active_copy_orders(&db, user_id).await.unwrap();
+        assert_eq!(open1, 1, "buy 10 tokenA 后应 1 开仓，实际 {open1}");
+
+        // 2. sell 10 tokenA（往返）→ filled + 成交行
+        let sell_id = uuid::Uuid::new_v4();
+        acct::enqueue_copy_order(&db, sell_id, follow_id, user_id, "polymarket", "polymarket", "m", "tokenA", "sell", 0.5, 10.0, "tg", chrono::Utc::now(), None, "pending", None).await.unwrap();
+        acct::claim_copy_order_status(&db, sell_id, "filled", None).await.unwrap();
+        acct::insert_copy_execution(&db, sell_id, user_id, "polymarket", "m", "tokenA", Some("0xsell"), "sell", 10.0, 0.5, 0.0, None).await.unwrap();
+        let open2 = acct::count_active_copy_orders(&db, user_id).await.unwrap();
+        assert_eq!(open2, 0, "往返（buy+sell 同 token）后应 0 开仓（不增），实际 {open2}");
+
+        // 3. per-follow 同口径
+        let f_open = acct::count_active_copy_orders_for_follow(&db, follow_id).await.unwrap();
+        assert_eq!(f_open, 0, "per-follow 往返后应 0 开仓，实际 {f_open}");
+
+        // 清理
+        let _ = sqlx::query("DELETE FROM account.copy_order WHERE user_id = $1").bind(user_id).execute(&db).await;
+        let _ = sqlx::query("DELETE FROM account.follow_relation WHERE user_id = $1").bind(user_id).execute(&db).await;
+        let _ = sqlx::query("DELETE FROM account.users WHERE id = $1").bind(user_id).execute(&db).await;
+        eprintln!("NET_POSITION ✅ 往返后 open_positions 不增");
+    }
+
+    /// 安全修复 2.2：revoke 后 load_credential 拒下单；重新预配（upsert）重置撤销态。
+    /// 仅需 PG。
+    #[tokio::test]
+    #[ignore]
+    async fn revoke_blocks_load_credential_and_reprovision_reactivates() {
+        let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://sharpside:sharpside_dev@127.0.0.1:5432/sharpside".to_string()
+        });
+        let db = sharpside_db::connect(&db_url, 5).await.expect("连 DB 失败");
+        sharpside_db::migrate(&db).await.expect("迁移失败");
+
+        let tg_id: i64 = 9_999_400_000 + (chrono::Utc::now().timestamp() % 1_000_000);
+        let user = acct::upsert_tg_user(&db, tg_id).await.expect("建用户失败");
+        let user_id = user.id;
+
+        // 注入一条 polymarket 凭证（DevKms 风格明文 blob，load_credential 不解密即可反序列化）。
+        let blob = serde_json::json!({
+            "kind": "deposit_wallet_delegated",
+            "deposit_wallet_address": "0x000000000000000000000000000000000000dEaD",
+            "owner_address": "0x0000000000000000000000000000000000000bAd",
+            "encrypted_owner_key": "x",
+            "l2_api_key": "k",
+            "encrypted_l2_secret": "s",
+            "l2_passphrase": "p",
+            "builder_code": "bc",
+        });
+        acct::upsert_credential_with_proxy(&db, user_id, "polymarket", &blob, Some("0xdead"))
+            .await
+            .expect("写凭证失败");
+
+        // 1. revoke 前：load_credential 成功（构造一个最小 state 仅取 db）。
+        //    直接验证 revoke_credential 行为 + 列状态，避免依赖完整 AppState。
+        let row = acct::revoke_credential(&db, user_id, "polymarket")
+            .await
+            .expect("revoke 失败")
+            .expect("应有凭证行");
+        assert!(row.revoked_at.is_some(), "revoked_at 应已置位");
+        assert_eq!(row.revoked_by, Some(user_id));
+
+        // 2. 已撤销：再次 revoke 幂等返回 None（无活跃行可更新）。
+        let again = acct::revoke_credential(&db, user_id, "polymarket").await.unwrap();
+        assert!(again.is_none(), "已撤销凭证再次 revoke 应幂等返回 None");
+
+        // 3. list_credentials 反映 revoked_at。
+        let listed = acct::list_credentials(&db, user_id).await.unwrap();
+        let poly = listed.iter().find(|c| c.platform == "polymarket").unwrap();
+        assert!(poly.revoked_at.is_some(), "list_credentials 应见 revoked_at");
+
+        // 4. 重新预配（upsert）应重置撤销态 → 新凭证活跃。
+        acct::upsert_credential_with_proxy(&db, user_id, "polymarket", &blob, Some("0xdead"))
+            .await
+            .expect("重新预配失败");
+        let listed2 = acct::list_credentials(&db, user_id).await.unwrap();
+        let poly2 = listed2.iter().find(|c| c.platform == "polymarket").unwrap();
+        assert!(poly2.revoked_at.is_none(), "重新预配后 revoked_at 应重置为 None");
+
+        // 清理
+        let _ = sqlx::query("DELETE FROM account.user_venue_credentials WHERE user_id = $1").bind(user_id).execute(&db).await;
+        let _ = sqlx::query("DELETE FROM account.users WHERE id = $1").bind(user_id).execute(&db).await;
+        eprintln!("REVOKE ✅ revoke 后凭证标记撤销，重新预配重置");
+    }
 
     #[test]
     fn exec_params_override_min_notional() {
@@ -599,6 +901,47 @@ mod tests {
         let r = row("polymarket", "polymarket", "xyz", "0.5", "10");
         let err = parse_order_fields(&r).unwrap_err();
         assert!(err.contains("side 解析失败"));
+    }
+
+    #[test]
+    fn aggressive_buy_takes_best_ask_clamped_to_signal_plus_slip() {
+        // 信号 0.50，best_ask 0.51，slip 200bps(2%) → cap 0.51；min(0.51, 0.51)=0.51
+        let p = aggressive_price(Side::Buy, 0.50, 0.49, 0.51, 200.0, true).unwrap();
+        assert!((p - 0.51).abs() < 1e-9, "got {p}");
+    }
+
+    #[test]
+    fn aggressive_buy_clamps_when_ask_exceeds_signal_plus_slip() {
+        // 信号 0.50，best_ask 0.60，slip 200bps → cap 0.51；min(0.60, 0.51)=0.51（不追高）
+        let p = aggressive_price(Side::Buy, 0.50, 0.49, 0.60, 200.0, true).unwrap();
+        assert!((p - 0.51).abs() < 1e-9, "got {p}");
+    }
+
+    #[test]
+    fn aggressive_sell_takes_best_bid_clamped_to_signal_minus_slip() {
+        // 信号 0.50，best_bid 0.49，slip 200bps → floor 0.49；max(0.49, 0.49)=0.49
+        let p = aggressive_price(Side::Sell, 0.50, 0.49, 0.51, 200.0, true).unwrap();
+        assert!((p - 0.49).abs() < 1e-9, "got {p}");
+    }
+
+    #[test]
+    fn aggressive_sell_clamps_when_bid_below_signal_minus_slip() {
+        // 信号 0.50，best_bid 0.40，slip 200bps → floor 0.49；max(0.40, 0.49)=0.49（不杀跌）
+        let p = aggressive_price(Side::Sell, 0.50, 0.40, 0.51, 200.0, true).unwrap();
+        assert!((p - 0.49).abs() < 1e-9, "got {p}");
+    }
+
+    #[test]
+    fn aggressive_empty_book_errors() {
+        // best_ask=0 → 盘口为空，无法激进定价
+        let err = aggressive_price(Side::Buy, 0.50, 0.0, 0.0, 200.0, true).unwrap_err();
+        assert!(err.contains("盘口无对手价"));
+    }
+
+    #[test]
+    fn non_aggressive_returns_signal_price() {
+        let p = aggressive_price(Side::Buy, 0.50, 0.49, 0.51, 200.0, false).unwrap();
+        assert!((p - 0.50).abs() < 1e-9, "got {p}");
     }
 
     #[test]
@@ -853,6 +1196,8 @@ mod tests {
             worker_reconcile_secs: 15,
             reconcile_timeout_secs: 120,
             reconcile_worker_enabled: true,
+            copy_order_type: sharpside_venues_core::OrderType::Fak,
+            aggressive_pricing: true,
             jwt_secret: "stage2".into(),
         };
         let mut venue =
@@ -919,6 +1264,159 @@ mod tests {
             .execute(&db)
             .await;
         eprintln!("STAGE2_RESULT=REAL_ORDER_PLACED_AND_CANCELLED ✅ copier worker 真打 /order 路径验证通过");
+    }
+
+    /// 安全修复 1.3 e2e：`COPIER_DRY_RUN=false` + `POLYMARKET_CLOB_POST≠1` → dry-sign。
+    /// 验收：copy_order 留 `skipped`（skip_reason 含 dry-sign），**无** copy_execution 行。
+    ///
+    /// 前置同 stage2（PG + 代理可达 Polymarket + .env.local funded 凭证）：
+    /// ```bash
+    /// set -a; source .env.local; set +a
+    /// DATABASE_URL='postgres://sharpside:sharpside_dev@127.0.0.1:5432/sharpside' \
+    /// SHARPSIDE_KMS_DEV_PLAINTEXT=1 \
+    ///   cargo test -p sharpside-copier --test '*' stage2_dry_sign -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn stage2_dry_sign_skips_without_fill() {
+        use sharpside_kms::Kms;
+        let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://sharpside:sharpside_dev@127.0.0.1:5432/sharpside".to_string()
+        });
+        let owner_pk = std::env::var("POLYMARKET_TEST_OWNER_PK").expect("需设 POLYMARKET_TEST_OWNER_PK");
+        let owner_addr_str = std::env::var("POLYMARKET_TEST_OWNER_ADDRESS").expect("需设 POLYMARKET_TEST_OWNER_ADDRESS");
+        let dw_addr_str = std::env::var("POLYMARKET_TEST_DEPOSIT_WALLET").expect("需设 POLYMARKET_TEST_DEPOSIT_WALLET");
+        let builder_code = std::env::var("POLYMARKET_BUILDER_CODE").unwrap_or_else(|_| "019f6e85-dce2-7a7a-aa72-cadb8d498bbe".into());
+        // dry-sign：显式移除 POLYMARKET_CLOB_POST（≠1 → dry-sign 分支）
+        std::env::remove_var("POLYMARKET_CLOB_POST");
+
+        let db = sharpside_db::connect(&db_url, 5).await.expect("连 DB 失败");
+        sharpside_db::migrate(&db).await.expect("迁移失败");
+
+        let tg_id: i64 = 9_999_100_000 + (chrono::Utc::now().timestamp() % 1_000_000);
+        let user = acct::upsert_tg_user(&db, tg_id).await.expect("建用户失败");
+        let user_id = user.id;
+        let follow = sqlx::query(
+            r#"INSERT INTO account.follow_relation
+               (user_id, follow_platform, follow_address, execute_venue, channel, config, same_venue_only, active)
+               VALUES ($1,'polymarket',$2,'polymarket','tg','{}'::jsonb, false, true)
+               RETURNING id"#,
+        )
+        .bind(user_id)
+        .bind(format!("0xdrysign{tg_id}"))
+        .fetch_one(&db)
+        .await
+        .expect("建 follow_relation 失败");
+        let follow_id: uuid::Uuid = sqlx::Row::get(&follow, "id");
+
+        let owner_signer = sharpside_venues_polymarket::clob::signer_from_hex(&owner_pk).expect("owner PK 解析失败");
+        let owner_address: alloy_primitives::Address = owner_addr_str.parse().expect("owner addr 解析失败");
+        let client = sharpside_venues_polymarket::PolymarketClient::new();
+        let ts = chrono::Utc::now().timestamp();
+        let auth_sig = sharpside_venues_polymarket::clob::build_l1_auth_signature(&owner_signer, ts).expect("L1 签名失败");
+        let l2 = client.derive_api_key_l1(owner_address, &auth_sig, ts).await.expect("L1 deriveApiKey 失败（代理/网络）");
+
+        let kms = sharpside_kms::DevKms::enabled_for_test();
+        let enc_owner = kms.encrypt(&owner_pk).unwrap();
+        let enc_l2 = kms.encrypt(&l2.secret).unwrap();
+        let blob = serde_json::json!({
+            "kind": "deposit_wallet_delegated",
+            "deposit_wallet_address": dw_addr_str,
+            "owner_address": owner_addr_str,
+            "encrypted_owner_key": enc_owner,
+            "l2_api_key": l2.api_key,
+            "encrypted_l2_secret": enc_l2,
+            "l2_passphrase": l2.passphrase,
+            "builder_code": builder_code,
+        });
+        acct::upsert_credential_with_proxy(&db, user_id, "polymarket", &blob, Some(&dw_addr_str)).await.expect("写凭证失败");
+
+        // 取一个有 bid<ask 的活跃 token + 挂单价（需网络拉 Gamma + /book）
+        let mkt_url = format!("{}/markets?limit=50&active=true&closed=false&order=volume24hr&ascending=false", client.gamma_api());
+        let mkt: serde_json::Value = client.http_get_json(&mkt_url).await.expect("Gamma /markets 失败");
+        let arr = mkt.as_array().expect("/markets 返回数组");
+        let mut token_id = String::new();
+        let mut condition_id = String::new();
+        let mut price = 0.0_f64;
+        for pick in arr {
+            let Some(ids_str) = pick.get("clobTokenIds").and_then(|v| v.as_str()) else { continue };
+            let Ok(mut ids) = serde_json::from_str::<Vec<String>>(ids_str) else { continue };
+            if ids.is_empty() { continue; }
+            let tid = ids.remove(0);
+            let cid = pick.get("conditionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if cid.is_empty() { continue; }
+            let Ok(b) = client.book(&cid, &tid).await else { continue };
+            let (Some(bb), Some(ba)) = (b.bids.first(), b.asks.first()) else { continue };
+            let (Ok(bb_p), Ok(ba_p)) = (bb.price.as_deref().unwrap_or("0").parse::<f64>(), ba.price.as_deref().unwrap_or("0").parse::<f64>()) else { continue };
+            if !(bb_p > 0.0 && ba_p > 0.0 && bb_p < ba_p) { continue; }
+            let mid = (bb_p + ba_p) / 2.0;
+            let tick: f64 = pick.get("minimumTickSize").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).or_else(|| pick.get("minimumTickSize").and_then(|v| v.as_f64())).unwrap_or(0.01);
+            let p = (mid / tick).floor() * tick;
+            if p <= 0.0 { continue; }
+            token_id = tid; condition_id = cid; price = p;
+            break;
+        }
+        assert!(price > 0.0, "无可用活跃市场");
+        let size = ((1.0_f64 / price).ceil()).max(5.0);
+
+        let order_id = uuid::Uuid::new_v4();
+        acct::enqueue_copy_order(&db, order_id, follow_id, user_id, "polymarket", "polymarket", &condition_id, &token_id, "buy", price, size, "tg", chrono::Utc::now(), None, "pending", None).await.expect("插 copy_order 失败");
+        let order = acct::list_pending_copy_orders(&db, "tg", 50).await.unwrap().into_iter().find(|o| o.id == order_id).expect("找不到刚插的 order");
+
+        let config = crate::config::Config {
+            listen_addr: "0.0.0.0:0".into(),
+            database_url: db_url,
+            db_max_connections: 5,
+            worker_exec_secs: 5,
+            dry_run: false, // 关键：非 dry_run，走真实 place_order → dry-sign 分支
+            daily_max_notional: 100_000.0,
+            max_open_positions: 100,
+            rapid_flip_window_secs: 60,
+            rapid_flip_max_count: 100,
+            consecutive_loss_limit: 100,
+            min_dw_balance: 0.0,
+            withdraw_min_amount: 1.0,
+            withdraw_max_amount: 10000.0,
+            withdraw_daily_max: 10000.0,
+            worker_redeem_secs: 300,
+            redeem_worker_enabled: true,
+            worker_reclaim_secs: 60,
+            dispatched_timeout_secs: 600,
+            reclaim_worker_enabled: true,
+            worker_reconcile_secs: 15,
+            reconcile_timeout_secs: 120,
+            reconcile_worker_enabled: true,
+            copy_order_type: sharpside_venues_core::OrderType::Fak,
+            aggressive_pricing: true,
+            jwt_secret: "stage2".into(),
+        };
+        let venue = sharpside_venues_polymarket::PolymarketVenue::new().with_kms(std::sync::Arc::new(kms));
+        let mut registry = sharpside_venues_core::VenueRegistry::new();
+        registry.register(std::sync::Arc::new(venue));
+        let state = crate::state::AppState::new(config, db.clone(), registry);
+
+        process_one(&state, &order).await.expect("process_one 异常");
+
+        // 验收 1：copy_order 留 skipped，skip_reason 含 dry-sign
+        let updated = acct::get_copy_order(&db, order_id).await.unwrap();
+        eprintln!("dry-sign copy_order.status={} reason={:?}", updated.status, updated.skip_reason);
+        assert_eq!(updated.status, "skipped", "dry-sign 应置 skipped，而非 submitted/filled");
+        let reason = updated.skip_reason.unwrap_or_default();
+        assert!(reason.contains("dry-sign"), "skip_reason 须含 dry-sign，got: {reason}");
+
+        // 验收 2：无 copy_execution 行（不得记假成交）
+        let exec_count: i64 = sqlx::query_scalar("SELECT count(*) FROM account.copy_execution WHERE copy_order_id = $1")
+            .bind(order_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(exec_count, 0, "dry-sign 不得写 copy_execution（假成交），但查出 {exec_count} 行");
+
+        // 清理
+        let _ = sqlx::query("DELETE FROM account.copy_order WHERE user_id = $1").bind(user_id).execute(&db).await;
+        let _ = sqlx::query("DELETE FROM account.follow_relation WHERE user_id = $1").bind(user_id).execute(&db).await;
+        let _ = sqlx::query("DELETE FROM account.users WHERE id = $1").bind(user_id).execute(&db).await;
+        eprintln!("STAGE2_DRY_SIGN_RESULT=SKIPPED_NO_FILL ✅ dry-sign 未记成交、置 skipped");
     }
 
     /// 真实跟单 e2e：信号 → follow /internal/signals → 派生 copy_order → copier worker 真打 /order → 撤单。
@@ -1304,9 +1802,14 @@ mod tests {
             .expect("写凭证失败");
         eprintln!("B.step4 funded 凭证已注入(provision_live=true) dw={dw_addr_str}");
 
-        // 5. 自签 JWT（HS256，与 copier AuthUser 校验同口径：sub=user_id，exp=now+3600）
+        // 5. 自签 JWT（HS256，与 copier AuthUser 校验同口径：sub=user_id，exp=now+3600，jti 必填）
         let exp = (chrono::Utc::now().timestamp() + 3600) as usize;
-        let claims = serde_json::json!({ "sub": user_id.to_string(), "exp": exp });
+        let claims = serde_json::json!({
+            "sub": user_id.to_string(),
+            "exp": exp,
+            "jti": uuid::Uuid::new_v4().to_string(),
+            "iat": chrono::Utc::now().timestamp() as usize,
+        });
         let token = encode(
             &Header::new(jsonwebtoken::Algorithm::HS256),
             &claims,

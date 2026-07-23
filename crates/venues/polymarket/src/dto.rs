@@ -61,9 +61,12 @@ pub struct PositionDto {
     /// 钱包地址
     #[serde(rename = "user", default)]
     pub user: Option<String>,
-    /// market condition_id
+    /// market condition_id（mock / 旧字段名）。
     #[serde(rename = "market", default)]
     pub market: Option<String>,
+    /// 真实 Data API 用 `conditionId`。
+    #[serde(rename = "conditionId", default)]
+    pub condition_id: Option<String>,
     /// token_id（asset）
     #[serde(rename = "asset", default)]
     pub asset: Option<String>,
@@ -73,11 +76,22 @@ pub struct PositionDto {
     pub avg_price: Option<f64>,
     #[serde(rename = "currentPrice", default)]
     pub current_price: Option<f64>,
+    /// 真实 Data API 用 `curPrice`。
+    #[serde(rename = "curPrice", default)]
+    pub cur_price: Option<f64>,
     #[serde(rename = "realizedPnl", default)]
     pub realized_pnl: Option<f64>,
-    /// YES / NO
+    /// YES / NO（mock / 旧字段）；真实 API 用 `outcome`。
     #[serde(default)]
     pub side: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(rename = "eventSlug", default)]
+    pub event_slug: Option<String>,
+    #[serde(default)]
+    pub outcome: Option<String>,
 }
 
 /// 组合估值（Data API `/value`）。当前快照，非时间序列。
@@ -152,6 +166,9 @@ pub struct MarketDto {
     pub question: Option<String>,
     #[serde(default)]
     pub slug: Option<String>,
+    /// Gamma 偶发直接给的类目字符串（如 `Crypto`）；优先于 tags 派生。
+    #[serde(default)]
+    pub category: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
     pub tags: Option<Vec<String>>,
     #[serde(rename = "endDate", default)]
@@ -254,6 +271,29 @@ mod tests {
         assert_eq!(p.user.as_deref(), Some("0xabc"));
         assert!((p.size.unwrap() - 100.0).abs() < 1e-9);
         assert_eq!(p.side.as_deref(), Some("YES"));
+    }
+
+    #[test]
+    fn position_dto_deserialize_data_api_shape() {
+        // 真实 Data API：conditionId / curPrice / title / eventSlug / outcome。
+        let json = r#"{
+            "proxyWallet": "0xabc",
+            "asset": "12345",
+            "conditionId": "0xcond",
+            "size": 10.5,
+            "avgPrice": 0.4,
+            "curPrice": 0.55,
+            "title": "Will BTC hit 100k?",
+            "slug": "btc-100k",
+            "eventSlug": "btc-100k",
+            "outcome": "Yes"
+        }"#;
+        let p: PositionDto = serde_json::from_str(json).unwrap();
+        assert_eq!(p.condition_id.as_deref(), Some("0xcond"));
+        assert_eq!(p.cur_price, Some(0.55));
+        assert_eq!(p.title.as_deref(), Some("Will BTC hit 100k?"));
+        assert_eq!(p.event_slug.as_deref(), Some("btc-100k"));
+        assert_eq!(p.outcome.as_deref(), Some("Yes"));
     }
 
     #[test]

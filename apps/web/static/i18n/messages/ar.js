@@ -519,6 +519,8 @@ export default {
     "dataPoints": "{count} نقطة · {start} → {end}",
     "positionsTitle": "المراكز المفتوحة",
     "positionsEmpty": "لا مراكز مفتوحة",
+    "colMarket": "السوق",
+    "colOutcome": "الاتجاه",
     "colSize": "الحجم",
     "colAvgCost": "متوسط التكلفة",
     "colOpenedAt": "تاريخ الفتح",

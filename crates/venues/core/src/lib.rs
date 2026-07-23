@@ -272,6 +272,7 @@ mod tests {
                 filled_price: 0.0,
                 tx_hash: None,
                 fee: 0.0,
+                dry: false,
             })
         }
     }

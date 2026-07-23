@@ -1,45 +1,39 @@
-//! hot worker — 浮仓快照 + 仓位 diff 信号派生（自适应频率）。
+//! hot worker — 第 3 层（方案 A）降级为**对账补漏**：仍写浮仓快照，但信号只在
+//! trade_watch（逐笔主源）漏掉仓位变化时才补发，跨源去重靠 `raw_trades` 信号账。
 //!
 //! 对应 `docs/ARCHITECTURE.md` §6.1 / `docs/VENUE_DESIGN.md` §8 / `docs/FLOWS.md` §5。
 //!
-//! 每个 tick：对每个已注册 signal_source Venue 的监控目标（热钥 ∪ 活跃直接跟随 ∪
+//! 每个 tick：对每个已注册 signal_source Venue 的到期监控目标（热钥 ∪ 活跃直接跟随 ∪
 //! 活跃 identity 跟随下的各 trader），
-//!   1. 拉 positions → 与 `latest_snapshots()` 上一轮 diff
-//!   2. 检出仓位变化（增/减/平/新开）→ 构造 `SignalPayload`（携带 trader.identity_id）→ POST `{FOLLOW_URL}/internal/signals`
-//!   3. 写 `trader_positions_snapshot`（append-only）
+//!   1. 拉 positions → 写 `trader_positions_snapshot`（append-only，推进快照供下轮对账）
+//!   2. **对账**：用"落后一轮闭合窗口"——prev（上一轮 T_prev）减 prev_prev（再上一轮 T_prev_prev），
+//!      Δ 落在已闭合区间 [T_prev_prev, T_prev] 内。此时 trade_watch（3s 轮询）早已轮询过该区间，
+//!      故对 raw_trades 求带符号 size 之和即"trades 已覆盖量"，**无竞态、无双计**。
+//!   3. 残差 = Δ − covered。|残差| > ε 才补发 diff 信号（trades 漏的 / 非交易仓位变化）。
 //!
-//! 信号延迟不丢数据：失败的目标下一轮重试。`FOLLOW_URL` 为空串则禁用 emit（仅快照）。
-//! 监控范围扩展到所有活跃跟随目标，避免「非热钥被跟随却无信号」的静默失效。
+//! 为何落后一轮：若用 current vs prev，窗口 [T_prev, T_now] 含尚未被 trade_watch 轮询到的成交，
+//! 残差会把"trads 还没抓到"误判为漏 → 双计。落后一轮保证窗口完全闭合，trade_watch 已覆盖。
+//! 代价：diff 补漏滞后 2 个扫描周期（安全网，可接受）。
+//!
+//! trade_watch 宕机时 covered=0 → 残差=Δ → diff 接管为信号源（期望的降级行为）。
+//! 赎回/split/转账导致的非交易仓位变化：残差非零会补发，但 copier 的 market_tradable 校验
+//! 会 skip 已结算市场（赎回主场景），避免对已结算市场跟卖。
 
 use crate::registry::enabled_signal_sources;
 use crate::state::AppState;
+use crate::workers::signal_emit::{emit_signals, SignalPayload};
 use rust_decimal::prelude::ToPrimitive;
-use serde::Serialize;
-use sharpside_db::queries::monitor;
+use sharpside_db::queries::{monitor, raw};
 use sharpside_shared::{Platform, Side};
-use sharpside_venues_core::{Position, VenueCapabilities};
+use sharpside_venues_core::VenueCapabilities;
 use std::collections::HashMap;
 use std::time::Duration;
-
-/// POST 到 follow `/internal/signals` 的 body。字段口径与 follow::signal::SignalEvent 对齐。
-#[derive(Debug, Clone, Serialize)]
-struct SignalPayload {
-    platform: Platform,
-    trader_id: String,
-    token_id: String,
-    market_id: String,
-    side: Side,
-    price: f64,
-    size: f64,
-    ts: chrono::DateTime<chrono::Utc>,
-    identity_id: Option<uuid::Uuid>,
-}
 
 /// 仓位变化阈值：|delta| > 此值才 emit（过滤浮点噪声）。
 const DELTA_EPSILON: f64 = 1e-6;
 
 pub async fn run(state: AppState) {
-    // hot_secs 现为调度节拍（自适应扫描 Phase B）：每这么久检查一次"谁到期"。
+    // hot_secs 为调度节拍（自适应扫描 Phase B）：每这么久检查一次"谁到期"。
     // 真实扫描周期 = 热钥 per-row scan_interval_secs / 跟随类 follow_scan_secs。
     let tick = state.config.workers.hot_secs.max(1);
     let follow_interval = state.config.workers.follow_scan_secs.max(1) as i32;
@@ -73,18 +67,7 @@ pub async fn run(state: AppState) {
                 for w in &targets {
                     match venue.positions(&w.address).await {
                         Ok(positions) => {
-                            // 1. diff vs 上一轮快照
-                            let signals = diff_positions(
-                                platform,
-                                &w.address,
-                                w.identity_id,
-                                &positions,
-                                &state,
-                            )
-                            .await;
-                            // 2. emit
-                            emit_signals(&state, signals).await;
-                            // 3. 写新快照
+                            // 1. 写新快照（推进 last_scanned_at，供下轮 prev 用）
                             let now = chrono::Utc::now();
                             for p in &positions {
                                 let _ = monitor::insert_position_snapshot(
@@ -101,6 +84,16 @@ pub async fn run(state: AppState) {
                                 )
                                 .await;
                             }
+                            // 2. 对账补漏（落后一轮闭合窗口 + 覆盖检查）
+                            let signals = reconcile_positions(
+                                platform,
+                                &w.address,
+                                w.identity_id,
+                                &state,
+                            )
+                            .await;
+                            // 3. emit 残差信号
+                            emit_signals(&state, signals).await;
                         }
                         Err(sharpside_venues_core::VenueError::Unsupported(_)) => {}
                         Err(e) => {
@@ -110,171 +103,164 @@ pub async fn run(state: AppState) {
                 }
             }
         }
+        state.worker_ticks.touch_hot();
     }
 }
 
-/// 比对当前 positions 与上一轮快照，检出仓位变化并构造信号。
-/// - delta > 0 → Buy |delta|
-/// - delta < 0 → Sell |delta|
-/// - 新 token（prev 无）→ Buy current.size
-/// - 消失 token（prev 有，current 无）→ Sell prev.size（完全平仓）
-async fn diff_positions(
+/// 对账补漏：prev（上一轮）vs prev_prev（再上一轮）的仓位 Δ，减去 raw_trades 已覆盖量，残差才 emit。
+///
+/// 落后一轮闭合窗口：窗口 [T_prev_prev, T_prev] 完全闭合，trade_watch 已轮询过，覆盖查询无竞态。
+/// 需要至少两轮快照（prev + prev_prev）才能对账；不足则静默（bootstrap）。
+async fn reconcile_positions(
     platform: Platform,
     address: &str,
     identity_id: Option<uuid::Uuid>,
-    current: &[Position],
     state: &AppState,
 ) -> Vec<SignalPayload> {
+    // prev = 上一轮快照（T_prev）。注意：本轮 current 已写入，故 latest_snapshots 返回的是上一轮。
     let prev = match monitor::latest_snapshots(&state.db, platform.as_str(), address).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(platform = platform.as_str(), address, error = %e, "读上一轮快照失败，本轮不 emit");
+            tracing::warn!(platform = platform.as_str(), address, error = %e, "对账读 prev 快照失败，本轮不 emit");
             return Vec::new();
         }
     };
-    // Bootstrap：首次监控该 address 时 prev 为空。若直接 diff，会把 trader 现有全部持仓
-    // 当作 Buy 信号发出（用户刚跟随即收到存量仓位跟单指令）。本轮只写 baseline 快照、不 emit；
-    // 下一轮起 prev 非空，真实增量才派生信号。
     if prev.is_empty() {
-        tracing::info!(
-            platform = platform.as_str(),
-            address,
-            "bootstrap：首次监控，仅写 baseline 快照，本轮不 emit 信号"
-        );
+        // 仅有本轮刚写的快照、或从未扫描：不足两轮，bootstrap 静默。
         return Vec::new();
     }
-    let now = chrono::Utc::now();
-    let prev_map: HashMap<String, &sharpside_db::models::PositionSnapshot> =
-        prev.iter().map(|s| (s.token_id.clone(), s)).collect();
-    let cur_tokens: HashMap<&str, ()> = current.iter().map(|p| (p.token_id.as_str(), ())).collect();
+    // T_prev = prev 快照的捕获时刻（取 max，同一轮扫描各 token captured_at 一致）。
+    let t_prev = match prev.iter().map(|s| s.captured_at).max() {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    // prev_prev = T_prev 之前最近一轮快照（T_prev_prev）。
+    let prev_prev = match monitor::latest_snapshots_before(&state.db, platform.as_str(), address, t_prev).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(platform = platform.as_str(), address, error = %e, "对账读 prev_prev 快照失败，本轮不 emit");
+            return Vec::new();
+        }
+    };
+    if prev_prev.is_empty() {
+        // 仅一轮历史：bootstrap 静默（需两轮才能构成闭合窗口）。
+        return Vec::new();
+    }
+    let t_prev_prev = prev_prev
+        .iter()
+        .map(|s| s.captured_at)
+        .max()
+        .unwrap_or(t_prev);
 
+    let prev_prev_map: HashMap<String, &sharpside_db::models::PositionSnapshot> =
+        prev_prev.iter().map(|s| (s.token_id.clone(), s)).collect();
+    let prev_tokens: HashMap<&str, ()> = prev.iter().map(|s| (s.token_id.as_str(), ())).collect();
+
+    let now = chrono::Utc::now();
+    let trader_id = platform.normalize_trader_id(address);
     let mut signals = Vec::new();
 
-    // 当前持仓变化 / 新开
-    for p in current {
-        let prev_size = prev_map
-            .get(&p.token_id)
-            .map(|s| s.size.to_f64().unwrap_or(0.0))
+    // prev 中各 token 的变化（相对 prev_prev）
+    for s in &prev {
+        let prev_prev_size = prev_prev_map
+            .get(&s.token_id)
+            .map(|p| p.size.to_f64().unwrap_or(0.0))
             .unwrap_or(0.0);
-        let delta = p.size - prev_size;
+        let prev_size = s.size.to_f64().unwrap_or(0.0);
+        let delta = prev_size - prev_prev_size;
         if delta.abs() <= DELTA_EPSILON {
             continue;
         }
-        let side = if delta > 0.0 { Side::Buy } else { Side::Sell };
+        // 覆盖检查：raw_trades 在闭合窗口 [T_prev_prev, T_prev] 的带符号 size 之和。
+        let covered = match raw::sum_signed_trade_size(
+            &state.db,
+            platform.as_str(),
+            address,
+            &s.token_id,
+            t_prev_prev,
+            t_prev,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    platform = platform.as_str(), address, token = %s.token_id, error = %e,
+                    "覆盖查询失败，该 token 本轮跳过（下轮重试）",
+                );
+                continue;
+            }
+        };
+        let residual = delta - covered;
+        if residual.abs() <= DELTA_EPSILON {
+            // trades 已完全覆盖该 Δ → 静默（不双计）
+            continue;
+        }
+        let side = if residual > 0.0 { Side::Buy } else { Side::Sell };
+        let price = s.avg_price.to_f64().unwrap_or(0.0);
         signals.push(SignalPayload {
             platform,
-            trader_id: address.into(),
-            token_id: p.token_id.clone(),
-            market_id: p.market_id.clone(),
+            trader_id: trader_id.clone(),
+            token_id: s.token_id.clone(),
+            market_id: s.condition_id.clone().unwrap_or_default(),
             side,
-            // 用当前均价作为信号价格（近似成交价；follow 派生 sizing 用此）
-            price: if p.avg_price > 0.0 {
-                p.avg_price
-            } else {
-                p.current_price
-            },
-            size: delta.abs(),
+            price: if price > 0.0 { price } else { s.current_price.to_f64().unwrap_or(0.0) },
+            size: residual.abs(),
             ts: now,
             identity_id,
+            source_id: None,
         });
     }
 
-    // 完全平仓：prev 有但 current 无
-    for s in &prev {
-        if cur_tokens.contains_key(s.token_id.as_str()) {
+    // prev_prev 有但 prev 无：窗口内完全平仓（trades 应已覆盖 → 残差通常为 0，但若 trades 漏则补发 Sell）。
+    for s in &prev_prev {
+        if prev_tokens.contains_key(s.token_id.as_str()) {
             continue;
         }
-        let prev_size = s.size.to_f64().unwrap_or(0.0);
-        if prev_size <= DELTA_EPSILON {
+        let prev_prev_size = s.size.to_f64().unwrap_or(0.0);
+        if prev_prev_size <= DELTA_EPSILON {
             continue;
         }
-        let prev_price = s.avg_price.to_f64().unwrap_or(0.0);
+        // 平仓 Δ = -prev_prev_size（仓位从 prev_prev_size → 0）
+        let delta = -prev_prev_size;
+        let covered = match raw::sum_signed_trade_size(
+            &state.db,
+            platform.as_str(),
+            address,
+            &s.token_id,
+            t_prev_prev,
+            t_prev,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    platform = platform.as_str(), address, token = %s.token_id, error = %e,
+                    "覆盖查询（平仓）失败，该 token 本轮跳过",
+                );
+                continue;
+            }
+        };
+        let residual = delta - covered;
+        if residual.abs() <= DELTA_EPSILON {
+            continue;
+        }
+        // 平仓残差为负 → Sell |residual|
+        let price = s.avg_price.to_f64().unwrap_or(0.0);
         signals.push(SignalPayload {
             platform,
-            trader_id: address.into(),
+            trader_id: trader_id.clone(),
             token_id: s.token_id.clone(),
             market_id: s.condition_id.clone().unwrap_or_default(),
             side: Side::Sell,
-            price: if prev_price > 0.0 {
-                prev_price
-            } else {
-                s.current_price.to_f64().unwrap_or(0.0)
-            },
-            size: prev_size,
+            price: if price > 0.0 { price } else { s.current_price.to_f64().unwrap_or(0.0) },
+            size: residual.abs(),
             ts: now,
             identity_id,
+            source_id: None,
         });
     }
 
     signals
-}
-
-/// 批量 POST 信号到 follow `/internal/signals`。失败则落 `signal_outbox` 由 replay worker 重发，
-/// 不再静默丢弃（H4 修复）。快照写入仍正常推进——outbox 兜底重发，不阻塞 diff。
-async fn emit_signals(state: &AppState, signals: Vec<SignalPayload>) {
-    if signals.is_empty() {
-        return;
-    }
-    let follow_url = state.config.follow_url.trim();
-    if follow_url.is_empty() {
-        return;
-    }
-    let url = format!("{}/internal/signals", follow_url.trim_end_matches('/'));
-    let n = signals.len();
-    let secret = state.config.follow_signal_secret.trim();
-    let mut failed = 0usize;
-    for sig in signals {
-        let trader = sig.trader_id.clone();
-        let token = sig.token_id.clone();
-        // 与 follow 侧 copy_order.signal_id 用同一算法，保证 outbox 重发幂等。
-        let sig_id = sharpside_shared::signal_id(
-            sig.platform.as_str(),
-            &sig.trader_id,
-            &sig.token_id,
-            sig.ts,
-        );
-        let mut req = state.http.post(&url).json(&sig);
-        if !secret.is_empty() {
-            req = req.header("x-internal-secret", secret);
-        }
-        let ok = match req.send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    let body = resp.text().await.unwrap_or_default();
-                    tracing::warn!(
-                        status = %status,
-                        trader = %trader,
-                        token = %token,
-                        body = body.chars().take(200).collect::<String>(),
-                        "follow /internal/signals 非 2xx，落 outbox 待重发",
-                    );
-                    false
-                } else {
-                    true
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, trader = %trader, token = %token, "POST follow /internal/signals 失败，落 outbox 待重发");
-                false
-            }
-        };
-        if !ok {
-            failed += 1;
-            let payload = match serde_json::to_value(&sig) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(error = %e, "SignalPayload 序列化失败，无法落 outbox，该信号丢失");
-                    continue;
-                }
-            };
-            if let Err(e) =
-                sharpside_db::queries::outbox::enqueue_signal_outbox(&state.db, &sig_id, &payload, &url, 5)
-                    .await
-            {
-                tracing::error!(error = %e, signal_id = %sig_id, "signal_outbox 落表失败，该信号丢失");
-            }
-        }
-    }
-    tracing::info!(n, failed, "hot worker emit 信号完成（失败已落 outbox）");
 }

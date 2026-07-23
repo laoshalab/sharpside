@@ -4,6 +4,7 @@ use crate::config::Config;
 use async_trait::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use sqlx::PgPool;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -14,16 +15,19 @@ use std::sync::Arc;
 pub struct AppState {
     pub config: Arc<Config>,
     pub http: reqwest::Client,
+    /// JWT denylist（与 account 同表）；本服务只读、不跑 migrate。
+    pub db: PgPool,
 }
 
 impl AppState {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, db: PgPool) -> Self {
         Self {
             config: Arc::new(config),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client build"),
+            db,
         }
     }
 }

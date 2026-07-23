@@ -25,3 +25,8 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+# 安全修复 3.3：admin SSO/OIDC —— HTTP 客户端（discovery/code 交换）+ JWT（id_token 校验 + session 签发）+ base64/rand。
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }

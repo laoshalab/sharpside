@@ -3,6 +3,7 @@
 //! 原始层保留各 Venue API 原貌，ingest worker 写入，perf worker 读取重算。
 
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
@@ -186,4 +187,86 @@ pub async fn map_market_categories(
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().collect())
+}
+
+/// 取某 Venue 下指定 `venue_market_id` 集合的 `(title, slug)` 映射。
+///
+/// 交易者详情「当前持仓」用：`condition_id` → 市场标题 / Polymarket 外链 slug。
+pub async fn map_market_meta(
+    pool: &PgPool,
+    platform: &str,
+    market_ids: &[String],
+) -> Result<std::collections::HashMap<String, (String, Option<String>)>, DbError> {
+    if market_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT venue_market_id, title, slug FROM trader_hub.raw_markets \
+         WHERE platform = $1 AND venue_market_id = ANY($2)",
+    )
+    .bind(platform)
+    .bind(market_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, title, slug)| (id, (title, slug)))
+        .collect())
+}
+
+// ── 第 3 层（方案 A）：raw_trades 作为交易信号账 ──
+
+/// 第 3 层：某 `(platform, address, token_id)` 在 `[from, to]` 窗口内 raw_trades 的**带符号 size 之和**。
+///
+/// diff 对账用：`covered = Σ(size * (+1 if BUY else -1))`，与仓位 Δ 比较。
+/// BUY 计正、SELL 计负，故 round-trip（买10+卖10）净 0，与仓位 Δ 口径一致。
+/// 走 `idx_raw_trades_trader_token (platform, address, token_id, ts)` 索引范围扫描。
+pub async fn sum_signed_trade_size(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+    token_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<f64, DbError> {
+    let row: Option<(Option<Decimal>,)> = sqlx::query_as(
+        r#"
+        SELECT COALESCE(SUM(
+            CASE WHEN side IN ('BUY','buy') THEN size ELSE -size END
+        ), 0)
+        FROM trader_hub.raw_trades
+        WHERE platform = $1 AND address = $2 AND token_id = $3
+          AND ts >= $4 AND ts <= $5
+        "#,
+    )
+    .bind(platform)
+    .bind(address)
+    .bind(token_id)
+    .bind(from)
+    .bind(to)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row
+        .and_then(|(d,)| d)
+        .and_then(|d| d.to_f64())
+        .unwrap_or(0.0))
+}
+
+/// 第 3 层：某 `(platform, address)` 在 raw_trades 中的最新成交时间（trade_watch 增量游标）。
+///
+/// 返回 None 表示该地址从未被 trade_watch 轮询过（bootstrap：本轮只记基线、不 emit，
+/// 与 diff 的 bootstrap 语义一致，避免把历史成交当新信号全发一遍）。
+pub async fn latest_trade_ts(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+        "SELECT MAX(ts) FROM trader_hub.raw_trades WHERE platform = $1 AND address = $2",
+    )
+    .bind(platform)
+    .bind(address)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(d,)| d))
 }

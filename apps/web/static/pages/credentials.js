@@ -3,7 +3,7 @@ import { el, skeleton, emptyState } from '../components/ui.js';
 import { withShell } from '../components/nav.js';
 import { listCredentials, getDelegation, provisionDepositWallet } from '../lib/account.js';
 import { toast } from '../store/toast.js';
-import { navigate } from '../router.js';
+import { navigate, remount } from '../router.js';
 import { t } from '../i18n/index.js';
 
 function stepNames() {
@@ -52,8 +52,39 @@ export async function credentialsPage() {
     polyCard.appendChild(el('div', { class: 'row' }, [
       el('button', { text: t('credentials.viewDelegation'), onclick: () => navigate('/settings/delegation') }),
       el('button', { text: t('credentials.reprovision'), onclick: async () => {
-        if (!confirm(t('credentials.reprovisionConfirm'))) return;
-        try { await provisionDepositWallet(); toast(t('credentials.reprovisionSuccess'), 'success'); credentialsPage().then(mount); } catch (e) { toast(e.message, 'error'); }
+        let msg = t('credentials.reprovisionConfirm');
+        let needDouble = false;
+        try {
+          const { getWallet, getPortfolio } = await import('../lib/copier.js');
+          const [w, p] = await Promise.all([
+            getWallet().catch(() => null),
+            getPortfolio({ period: '1m' }).catch(() => null),
+          ]);
+          const positions = (p && Array.isArray(p.positions)) ? p.positions : [];
+          const openCount = positions.filter((x) => Math.abs(Number(x.size) || 0) > 1e-9).length;
+          const openCost = positions.reduce((s, x) => s + (Number(x.cost_basis) || 0), 0);
+          const addr = String((w && w.deposit_wallet_address) || '').slice(0, 10) + '…';
+          if (openCount > 0) {
+            msg = t('delegation.reprovisionConfirmPositions', {
+              address: addr,
+              count: String(openCount),
+              cost: String(openCost),
+            });
+            needDouble = true;
+          } else if (w && w.cash_balance != null && Number(w.cash_balance) > 0) {
+            msg = t('delegation.reprovisionConfirmBalance', {
+              address: addr,
+              balance: String(w.cash_balance),
+            });
+          }
+        } catch (_) { /* ignore */ }
+        if (!confirm(msg)) return;
+        if (needDouble && !confirm(t('delegation.reprovisionConfirmPositionsAgain'))) return;
+        try {
+          await provisionDepositWallet({ confirm_replace: true });
+          toast(t('credentials.reprovisionSuccess'), 'success');
+          remount();
+        } catch (e) { toast(e.message, 'error'); }
       } }),
       el('button', { class: 'danger', disabled: true, text: t('credentials.revokePhase2') }),
     ]));
@@ -109,5 +140,3 @@ function provisionStepper(steps, live) {
   void live;
   return wrap;
 }
-
-function mount(node) { const app = document.getElementById('app'); app.innerHTML = ''; app.appendChild(node); }

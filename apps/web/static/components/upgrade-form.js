@@ -1,8 +1,4 @@
 // components/upgrade-form.js · watchlist → follow 升级模态。对应 Watchlist 功能规划。
-// 复用 follow-form 的字段口径（execute_venue / channel / sizing / 风控），
-// 但提交走 POST /follow/watchlists/{id}/upgrade（事务内删 watchlist + 建 follow）。
-// props: { watchlist: Watchlist, onDone: async (follow) => any }
-//   onDone：升级成功后回调（通常 toast + 跳转 /follows）。
 import { el } from './ui.js';
 import { upgradeWatchlist } from '../lib/watchlist.js';
 import { t } from '../i18n/index.js';
@@ -21,27 +17,38 @@ export function openUpgradeModal({ watchlist, onDone }) {
   form.appendChild(el('h2', { text: t('upgradeForm.title') }));
   form.appendChild(el('p', { class: 'muted', text: t('upgradeForm.targetDescription', { target }) }));
 
-  const venueF = field(t('followForm.executeVenue'), el('input', { id: 'execute_venue', value: watchlist.watch_platform || 'polymarket' }));
-  const channelF = field(t('followForm.channel'), selectEl('channel', [
+  const venueInput = el('input', { name: 'execute_venue', value: watchlist.watch_platform || 'polymarket' });
+  const channelSel = selectEl('channel', [
     ['tg', t('followForm.channelTg')],
     ['daemon', t('followForm.channelDaemon')],
-  ], 'tg'));
-  const sizingModeF = field('sizing mode', selectEl('sizing_mode', [
+  ], 'tg');
+  const modeSel = selectEl('sizing_mode', [
     ['fixed', t('followForm.sizingFixed')],
     ['proportional', t('followForm.sizingProportional')],
-  ], 'fixed'));
-  const sizingValF = field(t('followForm.sizingValue'), el('input', { id: 'sizing_value', type: 'number', step: '0.01', min: '0', value: '10' }));
-  const sizingHint = el('p', { class: 'muted', text: t('followForm.sizingHint') });
-  const sameVenueF = field('', el('label', {}, [el('input', { id: 'same_venue_only', type: 'checkbox', checked: 'checked' }), t('followForm.sameVenueOnly')]));
+  ], 'fixed');
+  const sizingInput = el('input', { name: 'sizing_value', type: 'number', step: '0.01', min: '0', value: '10' });
+  modeSel.onchange = () => {
+    const mode = modeSel.value;
+    const cur = Number(sizingInput.value);
+    if (mode === 'proportional' && (!(cur > 0) || cur > 1)) sizingInput.value = '0.5';
+    if (mode === 'fixed' && (!(cur > 0) || cur <= 1)) sizingInput.value = '10';
+  };
 
+  const sameVenueCb = el('input', { name: 'same_venue_only', type: 'checkbox', checked: 'checked' });
   const adv = el('details', { class: 'advanced' });
   adv.appendChild(el('summary', { text: t('upgradeForm.advanced') }));
-  adv.appendChild(field(t('followForm.maxOrder'), el('input', { id: 'max_order', type: 'number', step: '0.1', min: '0', value: '0' })));
-  adv.appendChild(field(t('followForm.dailyMax'), el('input', { id: 'daily_max', type: 'number', step: '0.1', min: '0', value: '0' })));
-  adv.appendChild(field(t('followForm.maxOpen'), el('input', { id: 'max_open', type: 'number', step: '1', min: '0', value: '0' })));
+  adv.appendChild(field(t('followForm.maxOrder'), el('input', { name: 'max_order', type: 'number', step: '0.1', min: '0', value: '0' })));
+  adv.appendChild(field(t('followForm.dailyMax'), el('input', { name: 'daily_max', type: 'number', step: '0.1', min: '0', value: '0' })));
+  adv.appendChild(field(t('followForm.maxOpen'), el('input', { name: 'max_open', type: 'number', step: '1', min: '0', value: '0' })));
 
   const errP = el('p', { class: 'error' });
-  [venueF, channelF, sizingModeF, sizingValF, sizingHint, sameVenueF, adv, errP].forEach(n => form.appendChild(n));
+  [field(t('followForm.executeVenue'), venueInput),
+   field(t('followForm.channel'), channelSel),
+   field(t('followForm.sizingMode'), modeSel),
+   field(t('followForm.sizingValue'), sizingInput),
+   el('p', { class: 'muted', text: t('followForm.sizingHint') }),
+   field('', el('label', {}, [sameVenueCb, t('followForm.sameVenueOnly')])),
+   adv, errP].forEach(n => form.appendChild(n));
 
   const actions = el('div', { class: 'modal-actions' });
   const cancelBtn = el('button', { text: t('common.cancel'), onclick: () => backdrop.remove() });
@@ -50,14 +57,20 @@ export function openUpgradeModal({ watchlist, onDone }) {
   form.appendChild(actions);
   modal.appendChild(form);
 
+  const q = (name) => form.querySelector(`[name="${name}"]`);
+
   okBtn.onclick = async (e) => {
     e.preventDefault();
     errP.textContent = '';
-    const venue = document.getElementById('execute_venue').value.trim();
-    const channel = document.getElementById('channel').value;
-    const mode = document.getElementById('sizing_mode').value;
-    const sv = Number(document.getElementById('sizing_value').value || 0);
+    const venue = venueInput.value.trim();
+    const channel = channelSel.value;
+    const mode = modeSel.value;
+    const sv = Number(sizingInput.value || 0);
     if (!(sv > 0)) { errP.textContent = t('followForm.errorSizing'); return; }
+    if (mode === 'proportional' && !(sv > 0 && sv <= 1)) {
+      errP.textContent = t('followForm.errorProportional');
+      return;
+    }
     const sizingValue = mode === 'fixed' ? { amount: sv } : mode === 'proportional' ? { ratio: sv } : { pct: sv };
     const body = {
       execute_venue: venue,
@@ -66,10 +79,10 @@ export function openUpgradeModal({ watchlist, onDone }) {
         sizing: { mode, value: sizingValue },
         execute_venue: venue,
         channel,
-        same_venue_only: document.getElementById('same_venue_only').checked,
-        max_notional_per_order: numOr0('max_order'),
-        daily_max_notional: numOr0('daily_max'),
-        max_open_positions: intOr0('max_open'),
+        same_venue_only: sameVenueCb.checked,
+        max_notional_per_order: numOr0(q('max_order')),
+        daily_max_notional: numOr0(q('daily_max')),
+        max_open_positions: intOr0(q('max_open')),
       },
     };
     okBtn.disabled = true;
@@ -87,8 +100,8 @@ export function openUpgradeModal({ watchlist, onDone }) {
   document.body.appendChild(backdrop);
 }
 
-function numOr0(id) { const v = Number(document.getElementById(id)?.value || ''); return Number.isFinite(v) && v > 0 ? v : 0; }
-function intOr0(id) { const v = parseInt(document.getElementById(id)?.value || '', 10); return Number.isFinite(v) && v > 0 ? v : 0; }
+function numOr0(node) { const v = Number(node?.value || ''); return Number.isFinite(v) && v > 0 ? v : 0; }
+function intOr0(node) { const v = parseInt(node?.value || '', 10); return Number.isFinite(v) && v > 0 ? v : 0; }
 function field(label, child) {
   const wrap = el('div', { class: 'field' });
   if (label) wrap.appendChild(el('label', { text: label }));
@@ -96,7 +109,7 @@ function field(label, child) {
   return wrap;
 }
 function selectEl(name, options, val) {
-  const s = el('select', { id: name });
+  const s = el('select', { name });
   for (const [v, l] of options) s.appendChild(el('option', { value: v, text: l, ...(v === val ? { selected: 'selected' } : {}) }));
   return s;
 }

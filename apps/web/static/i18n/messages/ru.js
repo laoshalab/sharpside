@@ -519,6 +519,8 @@ export default {
     "dataPoints": "{count} точек · {start} → {end}",
     "positionsTitle": "Открытые позиции",
     "positionsEmpty": "Нет открытых позиций",
+    "colMarket": "Рынок",
+    "colOutcome": "Исход",
     "colSize": "Размер",
     "colAvgCost": "Сред. цена",
     "colOpenedAt": "Открыто",

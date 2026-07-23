@@ -5,7 +5,7 @@
 //!   cargo test -p sharpside-account --test wallet_login -- --ignored --nocapture
 //!
 //! 流程：随机 EOA → GET /auth/wallet/nonce → 构造 SIWE → EIP-191 签名 →
-//!       POST /auth/wallet → GET /me → GET /me/wallets 校验。
+//!       POST /auth/wallet/token → GET /me → GET /me/wallets 校验。
 
 use alloy_primitives::utils::eip191_hash_message;
 use alloy_signer::SignerSync;
@@ -92,9 +92,9 @@ async fn wallet_login_e2e() {
     let sig = signer.sign_hash_sync(&digest).unwrap();
     let signature = format!("0x{}", hex::encode(sig.as_bytes()));
 
-    // 3) POST /auth/wallet
+    // 3) POST /auth/wallet/token（程序化路径：body 含 JWT）
     let auth: AuthResp = c
-        .post(format!("{ACCT}/auth/wallet"))
+        .post(format!("{ACCT}/auth/wallet/token"))
         .json(&serde_json::json!({ "message": message, "signature": signature }))
         .send()
         .await
@@ -108,6 +108,9 @@ async fn wallet_login_e2e() {
     let user_id = auth.user["id"].as_str().unwrap().to_string();
     assert!(!user_id.is_empty(), "user_id 非空");
     println!("✅ 钱包登录成功 user_id={user_id} address={address}");
+
+    // 3b) 浏览器路径 /auth/wallet 不应在 body 返回 token（需新 nonce，此处仅文档约定；
+    //     完整 cookie-only 由单元/契约覆盖；本 e2e 校验 token 端点可用）。
 
     // 4) GET /me（用 JWT）
     let me: Value = c
@@ -144,7 +147,7 @@ async fn wallet_login_e2e() {
 
     // 6) 重放防护：同一 nonce 二次登录应失败
     let replay = c
-        .post(format!("{ACCT}/auth/wallet"))
+        .post(format!("{ACCT}/auth/wallet/token"))
         .json(&serde_json::json!({ "message": message, "signature": signature }))
         .send()
         .await

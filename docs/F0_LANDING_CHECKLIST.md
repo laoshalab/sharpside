@@ -22,7 +22,7 @@
 | 10 | `#/settings/subscription` | 订阅 | §6.12 | ✅ | 档位对比卡 + 升级/取消 + 支付占位（测试开通） |
 | 11 | `#/settings/credentials` | Venue 凭证 | §6.5 | ✅ | Polymarket 卡 + 预配状态机 + Kalshi/Manifold 占位 + daemon key 入口 |
 | 12 | `#/settings/daemon-key` | daemon API key | §6.13 | ✅ | 状态 + 颁发/轮换 + 一次性明文弹窗 + 安装步骤 |
-| 13 | `#/settings/delegation` | 委托管理 | §6.4 | ✅ | 托管横幅 + 资产/交易权双卡 + 8步预配 + 凭证详情 + 撤销(锁) |
+| 13 | `#/settings/delegation` | 委托管理 | §6.4 | ✅ | 托管横幅 + 资产/交易权双卡 + 8步预配 + 凭证详情 + **撤销（平台侧）** |
 
 **路由注册核对**（`apps/web/static/main.js`）：以上 13 路由全部注册，鉴权页标 `'auth'`，登录页标 `'guest'`。
 
@@ -60,7 +60,7 @@
 | `UserVenueCredential` 加 `kind` 字段 | db | 凭证 | ✅ | 列级 `kind`（迁移 0017）；列表 API 返回；预配/upsert 从 blob 同步 |
 | `GET /venue-hub/identities`（身份列表） | venue-hub | 创建跟随 | ✅ | `manual_verified=true` 列表；前端下拉已接线 |
 | `POST /copier/manual-order` | copier | 手动下单 | — | Phase 2，F0 不含 |
-| `POST /account/me/deposit-wallet/revoke` | account | 委托撤销 | — | Phase 2，前端灰显+锁标 |
+| `POST /account/me/deposit-wallet/revoke` | account | 委托撤销 | ✅ | 平台侧停派发；响应含 `on_chain_revoked:false` 与链上未解除警告 |
 | `GET /account/me/security-log` | account | 安全日志 | — | Phase 2，F0 不含 |
 
 ---
@@ -70,7 +70,7 @@
 | 项 | 状态 | 说明 |
 |---|---|---|
 | 路由 | ✅ | hash 路由（`#/path?query`），守卫 auth/guest，401 全局事件跳登录 |
-| 鉴权 | ✅ | web: JWT 存 localStorage + `Authorization: Bearer`；admin: admin token |
+| 鉴权 | ✅ | web: HttpOnly cookie `sharpside_token`（优先）+ Bearer 兼容；admin: admin token / OIDC |
 | 设计系统 | ✅ | `tokens.css` 暗色优先 + `prefers-color-scheme` light 覆盖 |
 | 通用组件 | ✅ | `ui.js`（el/statCard/dataTable/skeleton/emptyState/fmt*）+ `follow-form` + `one-time-secret` |
 | 降级策略 | ✅ | 上游不可达返空结构，前端对 null 区块隐藏不阻塞整页 |
@@ -138,10 +138,12 @@
 
 ### ⏭ Phase 2（明确延后，设计文档已标注）
 - 手动下单 `#/trade/:market_id`
-- 委托撤销 `POST /me/deposit-wallet/revoke`
 - 安全日志 `#/settings/security-log`
 - 身份详情 `#/identities/:id`、市场浏览 `#/markets`
-- 非托管升级路径
+- 非托管升级路径（用户自持 owner；链上委托自助解除）
+
+### ~~已补完（原 Phase 2）~~
+- ~~委托撤销 `POST /me/deposit-wallet/revoke`~~ → ✅ 平台侧；链上委托须另行处理
 
 ---
 

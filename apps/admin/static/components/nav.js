@@ -1,6 +1,7 @@
 // components/nav.js · admin 分组导航。对应 docs/FRONTEND_DESIGN.md §7.1 + P1。
 import { el } from './ui.js';
-import { isLoggedIn, clearToken } from '../store/auth.js';
+import { isLoggedIn, clearSession, getSession } from '../store/auth.js';
+import { post } from '../api/client.js';
 import { navigate, isActive } from '../router.js';
 
 const GROUPS = [
@@ -16,7 +17,7 @@ const GROUPS = [
     links: [
       { href: '#/traders', label: '交易者管控' },
       { href: '#/hot-wallets', label: '热钥清单' },
-      { href: '#/tag-rules', label: '标签阈值' },
+      { href: '#/tag-rules', label: '标签规则' },
       { href: '#/category-mapping', label: '分类映射' },
     ],
   },
@@ -50,10 +51,16 @@ export function nav() {
 
   bar.appendChild(el('div', { class: 'spacer' }));
   if (isLoggedIn()) {
-    bar.appendChild(el('span', { class: 'muted', text: 'admin' }));
+    const email = (getSession() && getSession().email) || 'admin';
+    bar.appendChild(el('span', { class: 'muted', text: email }));
     bar.appendChild(el('button', {
       class: 'sm',
-      onclick: () => { clearToken(); navigate('/login'); },
+      onclick: async () => {
+        // 安全修复 3.3：清服务端 session cookie，再清本地缓存。
+        try { await post('/auth/oidc/logout'); } catch { /* best-effort */ }
+        clearSession();
+        navigate('/login');
+      },
       text: '退出',
     }));
   }

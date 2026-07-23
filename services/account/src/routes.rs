@@ -4,11 +4,15 @@
 //!
 //! - `POST /auth/tg`（TG bot 代签）
 //! - `GET  /auth/wallet/nonce`（钱包登录：签发一次性 nonce）
-//! - `POST /auth/wallet`（钱包登录：SIWE 验签 → upsert → 发 JWT）
+//! - `POST /auth/wallet`（浏览器：SIWE → cookie-only，body 不含 token）
+//! - `POST /auth/wallet/token`（程序化：SIWE → body 含 token + cookie）
 //! - `GET  /me`
 //! - `POST /me/subscription`
-//! - `POST /me/venue-credentials/{platform}`
-//! - `GET  /me/venue-credentials`
+//! - `POST /me/billing/invoices` · `GET /me/billing/invoices/active`
+//! - `POST /me/billing/invoices/{id}/submit-tx` · `GET /me/billing/history`
+//! - `POST /internal/billing/confirm`（须 X-Internal-Secret；gateway 屏蔽）
+//! - `GET  /me/venue-credentials`（列表；密文不回传）
+//! - `POST /internal/venue-credentials/{user_id}/{platform}`（内部/运维 upsert，须 X-Internal-Secret）
 //! - `POST /me/daemon-api-key`（轮换，返回明文一次）
 //! - `GET/POST/DELETE /me/wallets`（已登录用户多钱包管理 / 恢复因子）
 //! - `GET /healthz` / `GET /readyz`
@@ -19,11 +23,13 @@ use crate::siwe;
 use crate::state::AppState;
 use axum::extract::Path;
 use axum::http::HeaderMap;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sharpside_db::queries::account as acct;
 use sharpside_db::UserWallet;
+use uuid::Uuid;
 
 pub fn router(state: AppState) -> Router {
     // /auth/* 路由组：单独挂限流中间件（按 IP，防暴力撞库 / 注册刷量）。
@@ -32,6 +38,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/tg", post(tg_login))
         .route("/auth/wallet/nonce", get(wallet_nonce))
         .route("/auth/wallet", post(wallet_login))
+        .route("/auth/wallet/token", post(wallet_login_token))
+        .route("/auth/logout", post(logout))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::rate_limit::auth_middleware,
@@ -44,8 +52,12 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(me))
         .route("/me/subscription", post(update_subscription))
         .route("/me/venue-credentials", get(list_credentials))
-        .route("/me/venue-credentials/:platform", post(upsert_credential))
+        .route(
+            "/internal/venue-credentials/:user_id/:platform",
+            post(internal_upsert_credential),
+        )
         .route("/me/delegation", get(get_delegation))
+        .route("/me/delegation/archives", get(list_delegation_archives))
         .route("/me/daemon-api-key", post(rotate_daemon_key))
         .route("/me/wallets", get(list_wallets).post(link_wallet))
         .route("/me/wallets/:address", axum::routing::delete(unlink_wallet))
@@ -53,6 +65,20 @@ pub fn router(state: AppState) -> Router {
             "/me/deposit-wallet/provision",
             post(provision_deposit_wallet),
         )
+        .route("/me/deposit-wallet/revoke", post(revoke_deposit_wallet))
+        .route(
+            "/me/deposit-wallet/migrate-archive",
+            post(migrate_archive),
+        )
+        .route(
+            "/me/deposit-wallet/archives/:id/redeemable",
+            get(list_archive_redeemable),
+        )
+        .route(
+            "/me/deposit-wallet/archives/:id/redeem",
+            post(redeem_archive),
+        )
+        .merge(crate::billing::routes::router())
         .with_state(state)
 }
 
@@ -62,11 +88,17 @@ pub fn router(state: AppState) -> Router {
 /// → Relayer 部署 → L1 派生 L2 凭证 → batch approve → 余额同步 → 入库。
 /// 离线模式（默认）跳过网络步骤，仅完成本地可闭环部分；在线模式需 env
 /// `POLYMARKET_PROVISION_LIVE=1` + `POLYMARKET_DEPOSIT_INIT_CODE_HASH` + `POLYMARKET_BUILDER_API_KEY`。
+///
+/// 若已有**活跃**凭证，须 `confirm_replace: true`，否则 409；替换前旧密文写入
+/// `credential_archives`。
 #[derive(Debug, Deserialize)]
 pub struct ProvisionBody {
     /// Polymarket Builder Code（归因 + 免 gas + fee）。默认 `sharpside-builder`。
     #[serde(default = "default_builder_code")]
     pub builder_code: String,
+    /// 显式确认替换已有活跃凭证（否则 409）。已撤销凭证可直接重新预配。
+    #[serde(default)]
+    pub confirm_replace: bool,
 }
 
 fn default_builder_code() -> String {
@@ -78,6 +110,13 @@ async fn provision_deposit_wallet(
     auth: AuthUser,
     Json(body): Json<ProvisionBody>,
 ) -> Result<Json<crate::deposit::ProvisionResponse>, ApiError> {
+    if let Some(existing) = acct::get_credential(&state.db, auth.user_id, "polymarket").await? {
+        if existing.revoked_at.is_none() && !body.confirm_replace {
+            return Err(ApiError::Conflict(
+                "已有活跃 polymarket 凭证：须 confirm_replace=true 以替换（旧密文将归档；旧 Deposit Wallet 资金可能需手动迁移）".into(),
+            ));
+        }
+    }
     let resp = crate::deposit::provision(state, auth.user_id, body.builder_code).await?;
     Ok(Json(resp))
 }
@@ -90,6 +129,12 @@ async fn readyz(state: AppState) -> Result<Json<serde_json::Value>, ApiError> {
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub token: String,
+    pub user: sharpside_db::User,
+}
+
+/// 浏览器会话响应：仅 `user` + HttpOnly cookie，body **不含** token。
+#[derive(Debug, Serialize)]
+pub struct SessionResponse {
     pub user: sharpside_db::User,
 }
 
@@ -117,7 +162,7 @@ async fn tg_login(
     state: AppState,
     headers: HeaderMap,
     Json(body): Json<TgLoginBody>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let provided = headers
         .get("X-TG-Bot-Secret")
         .and_then(|v| v.to_str().ok())
@@ -134,7 +179,12 @@ async fn tg_login(
         &state.config.jwt_secret,
         state.config.jwt_ttl_seconds,
     )?;
-    Ok(Json(AuthResponse { token, user }))
+    Ok(auth_cookie_and_token(
+        token,
+        user,
+        state.config.cookie_secure,
+        state.config.jwt_ttl_seconds,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,18 +215,54 @@ async fn update_subscription(
 
 #[derive(Debug, Deserialize)]
 pub struct CredentialBody {
-    /// 加密凭证 blob（account 服务只存密文，KMS 加密由调用方/上游完成）
+    /// 加密凭证 blob（须为服务端/运维构造的 KMS 密文形态；本端点不做客户端开放写入）。
     pub encrypted_blob: serde_json::Value,
+    /// 可选：Deposit Wallet / proxy 地址。
+    pub proxy_address: Option<String>,
 }
 
-async fn upsert_credential(
+/// `POST /internal/venue-credentials/{user_id}/{platform}` —— 内部/运维 upsert。
+///
+/// 须 `X-Internal-Secret` 匹配 `ACCOUNT_INTERNAL_SECRET`。gateway 对
+/// `/api/account/internal/*` 直接 404，仅私网可达。覆盖前自动归档旧密文。
+async fn internal_upsert_credential(
     state: AppState,
-    auth: AuthUser,
-    Path(platform): Path<String>,
+    headers: HeaderMap,
+    Path((user_id, platform)): Path<(Uuid, String)>,
     Json(body): Json<CredentialBody>,
 ) -> Result<Json<sharpside_db::UserVenueCredential>, ApiError> {
-    let cred =
-        acct::upsert_credential(&state.db, auth.user_id, &platform, &body.encrypted_blob).await?;
+    let secret = state.config.internal_secret.trim();
+    if secret.is_empty() {
+        return Err(ApiError::Unauthorized(
+            "ACCOUNT_INTERNAL_SECRET 未配置，拒绝内部写凭证".into(),
+        ));
+    }
+    let got = headers
+        .get("x-internal-secret")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if !sharpside_shared::secrets::constant_time_eq(got.as_bytes(), secret.as_bytes()) {
+        return Err(ApiError::Unauthorized("internal secret 不匹配".into()));
+    }
+    if platform.trim().is_empty() {
+        return Err(ApiError::BadRequest("platform 不能为空".into()));
+    }
+    // 覆盖前归档（与 provision 路径一致）。
+    acct::archive_credential_if_exists(&state.db, user_id, &platform).await?;
+    let cred = acct::upsert_credential_with_proxy(
+        &state.db,
+        user_id,
+        &platform,
+        &body.encrypted_blob,
+        body.proxy_address.as_deref(),
+    )
+    .await?;
+    tracing::info!(
+        op = "internal_upsert_credential",
+        %user_id,
+        platform = %platform,
+        "内部凭证 upsert"
+    );
     Ok(Json(cred))
 }
 
@@ -227,11 +313,14 @@ async fn wallet_nonce(
     axum::extract::Query(q): axum::extract::Query<NonceQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let address = normalize_address(&q.address)?;
+    // 顺带清理过期 nonce（best-effort，失败不阻塞签发）。
+    let _ = acct::cleanup_stale_nonces(&state.db, state.config.siwe_max_age_secs).await;
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     acct::issue_nonce(&state.db, &address, &nonce).await?;
     Ok(Json(serde_json::json!({
         "nonce": nonce,
         "domain": state.config.public_domain,
+        "uri": state.config.siwe_preferred_uri,
         "chain_id": state.config.siwe_allowed_chains.first().copied().unwrap_or(137),
         "issued_at": chrono::Utc::now(),
     })))
@@ -243,23 +332,60 @@ pub struct WalletLoginBody {
     pub signature: String,
 }
 
-/// `POST /auth/wallet { message, signature }` — SIWE 验签 → 消费 nonce → upsert → 发 JWT。
+/// `POST /auth/wallet { message, signature }` — 浏览器路径：SIWE → cookie-only。
+/// body 仅含 `user`，**不含** token（防 XSS/响应截获读 JWT）。
 async fn wallet_login(
     state: AppState,
     Json(body): Json<WalletLoginBody>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
+    let (user, token) = wallet_login_core(&state, &body).await?;
+    Ok(auth_cookie_only(
+        token,
+        user,
+        state.config.cookie_secure,
+        state.config.jwt_ttl_seconds,
+    ))
+}
+
+/// `POST /auth/wallet/token { message, signature }` — 程序化路径：SIWE → body 含 token。
+/// 供集成测试 / 脚本 / 非浏览器客户端；同时写 HttpOnly cookie。
+async fn wallet_login_token(
+    state: AppState,
+    Json(body): Json<WalletLoginBody>,
+) -> Result<axum::response::Response, ApiError> {
+    let (user, token) = wallet_login_core(&state, &body).await?;
+    Ok(auth_cookie_and_token(
+        token,
+        user,
+        state.config.cookie_secure,
+        state.config.jwt_ttl_seconds,
+    ))
+}
+
+/// SIWE 验签 → 消费 nonce → upsert → 签发 JWT。login / token 两入口共用。
+async fn wallet_login_core(
+    state: &AppState,
+    body: &WalletLoginBody,
+) -> Result<(sharpside_db::User, String), ApiError> {
     let msg = siwe::verify_and_validate(
         &body.message,
         &body.signature,
         &state.config.public_domain,
+        &state.config.siwe_allowed_uris,
         &state.config.siwe_allowed_chains,
         state.config.siwe_max_age_secs,
     )?;
     let address = siwe::address_hex(&msg);
-    // 原子消费 nonce（防重放）
-    if !acct::consume_nonce(&state.db, &address, &msg.nonce).await? {
+    if !acct::consume_nonce(
+        &state.db,
+        &address,
+        &msg.nonce,
+        state.config.siwe_max_age_secs,
+    )
+    .await?
+    {
         return Err(ApiError::Unauthorized(
-            "nonce invalid or already used".into(),
+            "nonce invalid, expired, or already used".into(),
         ));
     }
     let user = acct::upsert_wallet_user(&state.db, &address).await?;
@@ -268,24 +394,119 @@ async fn wallet_login(
         &state.config.jwt_secret,
         state.config.jwt_ttl_seconds,
     )?;
-    Ok(Json(AuthResponse { token, user }))
+    Ok((user, token))
+}
+
+/// `POST /auth/logout` — 吊销当前 JWT（写 jti 入 denylist）。
+///
+/// 从 `Authorization: Bearer <token>` 取 token，验签拿 jti + user_id，写 denylist。
+/// 此后该 token 在任何校验点（account / copier）立即 401。幂等：重复登出同 jti 不报错。
+async fn logout(
+    state: AppState,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    // 安全修复 3.1：优先从 cookie 取 token，回退 Bearer。
+    let token = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .and_then(sharpside_shared::session::extract_token_from_cookie_header)
+        .or_else(|| {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .map(|s| s.trim().to_string())
+        })
+        .ok_or_else(|| ApiError::Unauthorized("missing session token".into()))?;
+    let claims = crate::auth::verify_jwt(&token, &state.config.jwt_secret)?;
+    let user_id = claims
+        .sub
+        .parse::<uuid::Uuid>()
+        .map_err(|_| ApiError::Unauthorized("invalid subject".into()))?;
+    acct::revoke_jwt(&state.db, &claims.jti, user_id).await?;
+    // 清 cookie + 200。
+    let cookie = sharpside_shared::session::clear_set_cookie(state.config.cookie_secure);
+    let mut resp = axum::Json(serde_json::json!({ "ok": true })).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+    }
+    Ok(resp)
+}
+
+/// 浏览器路径：JSON `{ user }` + `Set-Cookie`（HttpOnly），body **不含** token。
+fn auth_cookie_only(
+    token: String,
+    user: sharpside_db::User,
+    secure: bool,
+    ttl_seconds: i64,
+) -> axum::response::Response {
+    let cookie = sharpside_shared::session::build_set_cookie(&token, ttl_seconds, secure);
+    let mut resp = axum::Json(SessionResponse { user }).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+    }
+    resp
+}
+
+/// 程序化路径：JSON `{ token, user }` + `Set-Cookie`（兼容脚本 / TG 以外的 Bearer 客户端）。
+fn auth_cookie_and_token(
+    token: String,
+    user: sharpside_db::User,
+    secure: bool,
+    ttl_seconds: i64,
+) -> axum::response::Response {
+    let cookie = sharpside_shared::session::build_set_cookie(&token, ttl_seconds, secure);
+    let mut resp = axum::Json(AuthResponse { token, user }).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+    }
+    resp
 }
 
 // ── 已登录用户多钱包管理（恢复因子）──
 
 #[derive(Debug, Deserialize)]
 pub struct LinkWalletBody {
-    pub address: String,
+    /// SIWE 消息文本（EIP-4361）。前端先 `GET /auth/wallet/nonce?address=<待绑钱包>`
+    /// 取 nonce，拼入消息后由待绑钱包私钥 EIP-191 签名。
+    pub message: String,
+    /// 对应 EIP-191 签名（0x + 130 hex）。
+    pub signature: String,
     pub label: Option<String>,
 }
 
-/// `POST /me/wallets` — 绑定第二个钱包。地址须小写规范化。
+/// `POST /me/wallets` — 绑定第二个钱包（恢复因子）。
+///
+/// **安全**：必须由待绑钱包私钥签名证明所有权（SIWE），地址从验签消息权威导出，
+/// 不信任客户端传入的 `address`。nonce 原子消费防重放。这堵死「偷 JWT 即可绑
+/// 任意地址 → 提现到该地址」的资金流失向量（提现目标白名单 = 已绑钱包）。
 async fn link_wallet(
     state: AppState,
     auth: AuthUser,
     Json(body): Json<LinkWalletBody>,
 ) -> Result<Json<UserWallet>, ApiError> {
-    let address = normalize_address(&body.address)?;
+    let msg = siwe::verify_and_validate(
+        &body.message,
+        &body.signature,
+        &state.config.public_domain,
+        &state.config.siwe_allowed_uris,
+        &state.config.siwe_allowed_chains,
+        state.config.siwe_max_age_secs,
+    )?;
+    let address = siwe::address_hex(&msg);
+    // 原子消费 nonce（防重放）：与 wallet_login 同机制。
+    if !acct::consume_nonce(
+        &state.db,
+        &address,
+        &msg.nonce,
+        state.config.siwe_max_age_secs,
+    )
+    .await?
+    {
+        return Err(ApiError::Unauthorized(
+            "nonce invalid, expired, or already used".into(),
+        ));
+    }
     let w = acct::link_wallet(&state.db, auth.user_id, &address, body.label.as_deref()).await?;
     Ok(Json(w))
 }
@@ -333,7 +554,9 @@ pub struct DelegationView {
     pub provision_steps: Vec<StepStatus>,
     pub kms_key_id: Option<String>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Phase 2 前不可自助撤销。
+    /// 安全修复 2.2：撤销时间。`None` = 活跃；`Some` = 已撤销（前端 stepper 显示已撤销锁）。
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 是否可撤销（活跃凭证 = true；已撤销 = false）。
     pub can_revoke: bool,
 }
 
@@ -349,11 +572,13 @@ pub enum StepStatus {
 }
 
 async fn get_delegation(state: AppState, auth: AuthUser) -> Result<Json<DelegationView>, ApiError> {
-    let blob = acct::get_credential_blob(&state.db, auth.user_id, "polymarket").await?;
-    let blob = match blob {
-        Some(b) => b,
-        None => return Err(ApiError::NotFound("polymarket 凭证未预配".into())),
-    };
+    // 安全修复 2.2：读完整行（含 revoked_at），而非仅 blob。
+    let rows = acct::list_credentials(&state.db, auth.user_id).await?;
+    let row = rows
+        .into_iter()
+        .find(|c| c.platform == "polymarket")
+        .ok_or_else(|| ApiError::NotFound("polymarket 凭证未预配".into()))?;
+    let blob = &row.encrypted_blob;
     let _kind = blob
         .get("kind")
         .and_then(|v| v.as_str())
@@ -396,6 +621,9 @@ async fn get_delegation(state: AppState, auth: AuthUser) -> Result<Json<Delegati
         .map(String::from)
         .or_else(|| Some(state.kms.name().to_string()));
 
+    let revoked_at = row.revoked_at;
+    let can_revoke = revoked_at.is_none();
+
     Ok(Json(DelegationView {
         platform: "polymarket".into(),
         custody_tier: "delegated".into(),
@@ -407,9 +635,91 @@ async fn get_delegation(state: AppState, auth: AuthUser) -> Result<Json<Delegati
         provision_live,
         provision_steps,
         kms_key_id,
-        created_at: None,
-        can_revoke: false,
+        created_at: Some(row.created_at),
+        revoked_at,
+        can_revoke,
     }))
+}
+
+/// `GET /me/delegation/archives` — 历史 Deposit Wallet（重新预配归档）。
+/// 只返非密字段 + 链上余额；encrypted_* 永不回传。
+async fn list_delegation_archives(
+    state: AppState,
+    auth: AuthUser,
+) -> Result<Json<Vec<crate::migrate::ArchiveView>>, ApiError> {
+    let rows = crate::migrate::list_archives(&state, auth.user_id).await?;
+    Ok(Json(rows))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MigrateArchiveBody {
+    pub archive_id: i64,
+}
+
+/// `POST /me/deposit-wallet/migrate-archive` — 将归档 DW 上全部 pUSD 迁到当前活跃 DW。
+/// 旧 DW 未部署时先 Relayer WALLET-CREATE，再 WALLET batch transfer。
+async fn migrate_archive(
+    state: AppState,
+    auth: AuthUser,
+    Json(body): Json<MigrateArchiveBody>,
+) -> Result<Json<crate::migrate::MigrateResponse>, ApiError> {
+    let resp = crate::migrate::migrate_archive(&state, auth.user_id, body.archive_id).await?;
+    Ok(Json(resp))
+}
+
+/// `GET /me/deposit-wallet/archives/:id/redeemable` — 归档旧 DW 可赎回列表。
+async fn list_archive_redeemable(
+    state: AppState,
+    auth: AuthUser,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<crate::migrate::ArchiveRedeemableItem>>, ApiError> {
+    let rows = crate::migrate::list_archive_redeemable(&state, auth.user_id, id).await?;
+    Ok(Json(rows))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArchiveRedeemBody {
+    pub condition_id: String,
+}
+
+/// `POST /me/deposit-wallet/archives/:id/redeem` — 在归档旧 DW 上赎回已结算仓位。
+/// pUSD 留在旧 DW；再调用 migrate-archive 迁到当前钱包。
+async fn redeem_archive(
+    state: AppState,
+    auth: AuthUser,
+    Path(id): Path<i64>,
+    Json(body): Json<ArchiveRedeemBody>,
+) -> Result<Json<crate::migrate::ArchiveRedeemResponse>, ApiError> {
+    let resp =
+        crate::migrate::redeem_archive(&state, auth.user_id, id, &body.condition_id).await?;
+    Ok(Json(resp))
+}
+
+/// `POST /me/deposit-wallet/revoke` —— 撤销委托凭证（安全修复 2.2）。
+///
+/// 置 `user_venue_credentials.revoked_at=now()`、`revoked_by=user_id`，不可逆。
+/// copier `load_credential` 读到 `revoked_at IS NOT NULL` 即拒下单（pull-based 停派发）。
+/// 注意：仅撤销本平台凭证记录，不在链上撤销 Polymarket 委托（owner EOA 私钥仍由 KMS 托管，
+/// 用户须另行在 Polymarket 官网/链上解除委托；本端点确保 Sharpside 不再代其下单）。
+async fn revoke_deposit_wallet(
+    state: AppState,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let row = acct::revoke_credential(&state.db, auth.user_id, "polymarket")
+        .await?
+        .ok_or_else(|| ApiError::NotFound("polymarket 凭证未预配".into()))?;
+    tracing::info!(
+        user_id = %auth.user_id,
+        revoked_at = ?row.revoked_at,
+        "deposit wallet 凭证已撤销（不可逆），copier 将停派发"
+    );
+    Ok(Json(serde_json::json!({
+        "platform": "polymarket",
+        "revoked_at": row.revoked_at,
+        "revoked_by": row.revoked_by,
+        "on_chain_revoked": false,
+        "warning": "On-platform stop only: Sharpside will no longer place orders. Owner EOA remains in LocalKms; on-chain / Polymarket deposit-wallet delegation is NOT revoked—revoke separately on Polymarket / chain if needed.",
+    })))
 }
 
 /// 从 blob.provision_steps 解析 8 步；长度不对或非法值则返回 None（走推断兜底）。

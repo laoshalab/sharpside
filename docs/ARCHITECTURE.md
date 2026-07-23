@@ -209,7 +209,7 @@ sharpside/
   - Kalshi：KYC 账户 + API key（加密）
   - daemon_api_key 颁发与轮换（**绝不存私钥**）
 
-**对外 API**：`POST /auth/*`、`GET /me`、`POST /me/subscription`、`POST /me/venue-credentials/{platform}`、`POST /me/daemon-api-key`。
+**对外 API**：`POST /auth/wallet`（cookie-only）、`POST /auth/wallet/token`（程序化 Bearer）、`GET /me`、`POST /me/subscription`、`GET /me/venue-credentials`、`POST /internal/venue-credentials/{user_id}/{platform}`（须 `X-Internal-Secret`，gateway 屏蔽）、`POST /me/daemon-api-key`、`POST /me/deposit-wallet/provision`（活跃凭证须 `confirm_replace`）。
 
 ### 6.5 Gateway · API 网关 + BFF
 

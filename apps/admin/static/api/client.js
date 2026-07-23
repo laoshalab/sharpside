@@ -1,7 +1,7 @@
-// api/client.js · admin fetch 封装：/api 前缀 + admin token 注入 + 401 全局事件 + 错误归一化。
-// 对应 docs/FRONTEND_DESIGN.md §7.1。
+// api/client.js · admin fetch 封装：/api 前缀 + cookie 会话 + 401 全局事件。
+// 对应 docs/FRONTEND_DESIGN.md §7.1 / 安全修复 3.3。
 
-import { getToken, clearToken } from '../store/auth.js';
+import { getDevToken, clearSession } from '../store/auth.js';
 import { toast } from '../store/toast.js';
 
 const BASE = '/api';
@@ -17,10 +17,12 @@ export class ApiError extends Error {
 export async function request(path, { method = 'GET', body, headers = {} } = {}) {
   const url = BASE + path;
   const h = { ...headers };
-  const token = getToken();
+  // 安全修复 3.3：默认靠 HttpOnly session cookie（credentials: same-origin）。
+  // Dev 无 OIDC 时才附带 Bearer ADMIN_TOKEN。
+  const token = getDevToken();
   if (token) h['Authorization'] = 'Bearer ' + token;
   if (body !== undefined && !h['Content-Type']) h['Content-Type'] = 'application/json';
-  const opt = { method, headers: h };
+  const opt = { method, headers: h, credentials: 'same-origin' };
   if (body !== undefined) opt.body = JSON.stringify(body);
 
   let resp;
@@ -31,9 +33,9 @@ export async function request(path, { method = 'GET', body, headers = {} } = {})
   }
 
   if (resp.status === 401) {
-    clearToken();
+    clearSession();
     window.dispatchEvent(new CustomEvent('auth:401'));
-    throw new ApiError('admin token 无效或已过期', 401);
+    throw new ApiError('admin session 无效或已过期', 401);
   }
 
   const text = await resp.text();

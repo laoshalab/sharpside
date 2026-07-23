@@ -169,7 +169,15 @@ async fn process_user_redeem(
     };
 
     // 2. 防重复：已有 pending/mined 赎回则跳过。
-    if acct::redemption_exists_active(&state.db, user_id, condition_id, outcome).await? {
+    if acct::redemption_exists_active(
+        &state.db,
+        user_id,
+        condition_id,
+        outcome,
+        &deposit_wallet_address,
+    )
+    .await?
+    {
         return Ok(());
     }
 
@@ -201,6 +209,7 @@ async fn process_user_redeem(
         &token_id_str,
         amount_dec,
         "auto",
+        &deposit_wallet_address,
     )
     .await
     {

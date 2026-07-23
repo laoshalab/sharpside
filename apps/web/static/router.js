@@ -4,6 +4,7 @@ import { isLoggedIn } from './store/auth.js';
 import { t } from './i18n/index.js';
 
 const routes = []; // { pattern, render, guard }
+let renderSeq = 0;
 
 /// 注册路由。pattern 支持 :param 段，render(ctx) 返回 HTMLElement 或 Promise<HTMLElement>。
 /// guard: 'auth' | 'guest' | undefined
@@ -50,11 +51,14 @@ export function remount() {
 }
 
 async function render() {
+  const seq = ++renderSeq;
   const path = currentPath();
   const m = matchRoute(path);
   const app = document.getElementById('app');
   if (!m) {
-    app.innerHTML = `<div class="container"><div class="empty"><div class="icon">404</div><p>${t('common.notFound')}</p><p><a href="#/">${t('common.backHome')}</a></p></div></div>`;
+    if (seq !== renderSeq) return;
+    app.innerHTML = '';
+    app.appendChild(notFoundEl());
     return;
   }
   // 守卫：未登录仍停留在目标路径，展示连接入口（菜单可点）
@@ -65,6 +69,7 @@ async function render() {
       import('./lib/wallet-connect.js'),
       import('./store/toast.js'),
     ]);
+    if (seq !== renderSeq) return;
     const link = el('a', {
       href: '#/connect',
       class: 'auth-gate-link',
@@ -103,12 +108,54 @@ async function render() {
   app.innerHTML = '<div class="container"><div class="skeleton line"></div><div class="skeleton line"></div><div class="skeleton block"></div></div>';
   try {
     const node = await m.route.render({ params: m.params, path });
+    if (seq !== renderSeq) return; // 过期渲染：已被更新的导航取代
     app.innerHTML = '';
     if (node) app.appendChild(node);
     window.scrollTo(0, 0);
   } catch (e) {
-    app.innerHTML = `<div class="container"><div class="card"><h2>${t('common.loadFailed')}</h2><p class="neg">${e.message || e}</p><p><a href="#/">${t('common.backHome')}</a></p></div></div>`;
+    if (seq !== renderSeq) return;
+    app.innerHTML = '';
+    app.appendChild(loadErrorEl(e));
   }
+}
+
+function notFoundEl() {
+  const wrap = document.createElement('div');
+  wrap.className = 'container';
+  wrap.innerHTML = '<div class="empty"><div class="icon">404</div></div>';
+  const empty = wrap.firstChild;
+  const p = document.createElement('p');
+  p.textContent = t('common.notFound');
+  empty.appendChild(p);
+  const back = document.createElement('p');
+  const a = document.createElement('a');
+  a.href = '#/';
+  a.textContent = t('common.backHome');
+  back.appendChild(a);
+  empty.appendChild(back);
+  return wrap;
+}
+
+function loadErrorEl(e) {
+  const wrap = document.createElement('div');
+  wrap.className = 'container';
+  const card = document.createElement('div');
+  card.className = 'card';
+  const h2 = document.createElement('h2');
+  h2.textContent = t('common.loadFailed');
+  const msg = document.createElement('p');
+  msg.className = 'neg';
+  msg.textContent = String(e?.message || e || '');
+  const back = document.createElement('p');
+  const a = document.createElement('a');
+  a.href = '#/';
+  a.textContent = t('common.backHome');
+  back.appendChild(a);
+  card.appendChild(h2);
+  card.appendChild(msg);
+  card.appendChild(back);
+  wrap.appendChild(card);
+  return wrap;
 }
 
 export function startRouter() {

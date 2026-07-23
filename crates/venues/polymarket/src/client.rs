@@ -636,10 +636,11 @@ impl PolymarketClient {
         l2_api_key: &str,
         l2_secret: &str,
         l2_passphrase: &str,
-    ) -> Result<serde_json::Value, reqwest::Error> {
+    ) -> Result<serde_json::Value, String> {
         // 官方 clob-client-v2：GET /balance-allowance/update?asset_type=COLLATERAL&signature_type=3，
         // L2 HMAC method=GET、path=/balance-allowance/update（GET 不签 query/body）。
         // POLY_ADDRESS = owner EOA（L2 凭证所属），signature_type=3 → 服务端映射到 deposit wallet。
+        // 成功体可能是空 / 非 JSON（未充值时常见）；不再用 `.json()` 直接反序列化以免误报。
         let path = "/balance-allowance/update";
         let url = format!(
             "{}{}?asset_type=COLLATERAL&signature_type={}",
@@ -660,7 +661,26 @@ impl PolymarketClient {
         for (k, v) in &headers {
             req = req.header(k, v);
         }
-        req.send().await?.error_for_status()?.json().await
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "update /balance-allowance {status}: {}",
+                text.chars().take(400).collect::<String>()
+            ));
+        }
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        match serde_json::from_str(trimmed) {
+            Ok(v) => Ok(v),
+            Err(_) => {
+                // 2xx 但非 JSON（如纯文本 "OK"）——同步已受理，视为成功。
+                Ok(serde_json::json!({ "raw": trimmed.chars().take(200).collect::<String>() }))
+            }
+        }
     }
 
     /// `GET /balance-allowance`（CLOB API，L2 HMAC + signatureType=3）。

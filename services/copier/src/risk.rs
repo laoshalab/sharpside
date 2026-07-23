@@ -246,6 +246,8 @@ mod tests {
             worker_reconcile_secs: 15,
             reconcile_timeout_secs: 120,
             reconcile_worker_enabled: true,
+            copy_order_type: sharpside_venues_core::OrderType::Fak,
+            aggressive_pricing: true,
             jwt_secret: "test-secret".into(),
         }
     }

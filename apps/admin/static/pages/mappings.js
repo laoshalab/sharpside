@@ -46,16 +46,19 @@ function mappingCard(m, reload) {
   card.appendChild(el('p', {}, [el('strong', { text: 'to: ' }), el('span', { text: `${m.to_platform}/${m.to_market_id}` })]));
   card.appendChild(el('p', { class: 'muted', text: `confidence: ${m.confidence ?? '—'}` }));
 
-  const flipCb = el('input', { type: 'checkbox' });
+  // 预填服务端已有建议，避免误确认翻转映射。
+  const flipCb = el('input', { type: 'checkbox', ...(m.direction_flip ? { checked: 'checked' } : {}) });
   const flipWrap = el('label', { style: 'display:flex;align-items:center;gap:6px;margin:8px 0', title: 'Polymarket YES 可能对应 Kalshi No 合约（跟反方向会亏光）' }, [
     flipCb, el('span', { text: 'direction_flip (YES↔NO 翻转)' }),
   ]);
   card.appendChild(flipWrap);
 
   const notes = el('textarea', { placeholder: 'resolution_notes（同事件，结算规则一致…）', style: 'width:100%;min-height:60px;margin:8px 0' });
+  if (m.resolution_notes) notes.value = m.resolution_notes;
   card.appendChild(notes);
 
   const minNotional = el('input', { type: 'number', placeholder: 'min_notional（可选）', style: 'width:200px' });
+  if (m.min_notional != null && m.min_notional !== '') minNotional.value = String(m.min_notional);
   card.appendChild(minNotional);
 
   const btnRow = el('div', { class: 'row', style: 'margin-top:12px' });

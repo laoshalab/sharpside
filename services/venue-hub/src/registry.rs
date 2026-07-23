@@ -81,6 +81,7 @@ mod tests {
                 backfill_batch: 1,
                 backfill_refresh_days: 1,
                 signal_replay_secs: 1,
+                trade_watch_secs: 1,
             },
             auto_match_threshold: 0.7,
             identity_threshold: 0.6,
@@ -93,6 +94,7 @@ mod tests {
             follow_url: String::new(),
             follow_signal_secret: String::new(),
             admin_token: String::new(),
+            jwt_secret: String::from("dev-secret-change-me"),
         };
         let registry = build_registry(&config);
         assert!(registry

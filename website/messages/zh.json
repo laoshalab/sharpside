@@ -70,7 +70,8 @@
       "getting-started": "快速开始",
       "architecture": "架构",
       "operations": "运维手册"
-    }
+    },
+    "localeFallbackNotice": "当前语言暂无文档内容，已显示中文文档。"
   },
   "pages": {
     "copy": {

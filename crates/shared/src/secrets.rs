@@ -1,13 +1,16 @@
 //! 生产环境与密钥校验辅助。
 //!
-//! 对应安全审计 P0 修复：
+//! 对应安全审计 P0 / 阶段 3.5 修复：
 //! - [`is_production`]：读取 `APP_ENV` / `SHARPSIDE_ENV`，值为 `production` 时返回 true。
-//! - [`assert_secret`]：生产环境下，若密钥为空或命中已知默认值则 panic，拒绝启动。
+//! - [`assert_secret`]：生产环境下，空值 / 已知默认值 / 长度 < [`MIN_SECRET_LEN`] 则 panic。
 //!
 //! 设计目标：开发体验零损耗（缺失/默认值在 dev 下完全可用），生产强制收敛。
 //! 已知默认值清单覆盖各服务 config 中的 `unwrap_or_else` 回退值与 `.env.example` 占位。
 
 use std::env;
+
+/// 生产环境密钥最小长度（安全修复 3.5）。
+pub const MIN_SECRET_LEN: usize = 32;
 
 /// 已知不安全默认值（来自各服务 config 回退 + `.env.example` 占位）。
 ///
@@ -18,6 +21,8 @@ const KNOWN_DEFAULTS: &[&str] = &[
     "dev-tg-bot-secret",
     "dev-admin-token",
     "dev-daemon-key-change-me",
+    "e2e-account-internal-secret",
+    "e2e-internal-secret",
 ];
 
 /// 是否处于生产环境。
@@ -31,7 +36,7 @@ pub fn is_production() -> bool {
     raw.trim().eq_ignore_ascii_case("production")
 }
 
-/// 校验密钥：生产环境下，空值或已知默认值则 panic。
+/// 校验密钥：生产环境下，空值、已知默认值或长度不足则 panic。
 ///
 /// - `name`：变量名，仅用于错误信息（如 `"JWT_SECRET"`）。
 /// - `value`：实际读取到的值。
@@ -47,6 +52,13 @@ pub fn assert_secret<'a>(name: &str, value: &'a str) -> &'a str {
     }
     if KNOWN_DEFAULTS.contains(&trimmed) {
         panic!("{name} 命中已知默认值：生产环境必须使用独立强密钥（APP_ENV=production）");
+    }
+    // 安全修复 3.5：最小长度门槛，防短密钥暴力/熵不足。
+    if trimmed.len() < MIN_SECRET_LEN {
+        panic!(
+            "{name} 长度 {} < {MIN_SECRET_LEN}：生产环境须用 ≥{MIN_SECRET_LEN} 字符强密钥（APP_ENV=production）",
+            trimmed.len()
+        );
     }
     value
 }
@@ -101,11 +113,26 @@ mod tests {
         assert!(res.is_err(), "默认值在生产应 panic");
         let res = std::panic::catch_unwind(|| assert_secret("X", "  "));
         assert!(res.is_err(), "空值在生产应 panic");
-        // 合法强密钥放行
+        // 合法强密钥放行（≥32）
         assert_eq!(
             assert_secret("JWT_SECRET", "a-very-long-random-32byte-secret-xxx"),
             "a-very-long-random-32byte-secret-xxx"
         );
+        // 短密钥（非默认）也拒
+        let res = std::panic::catch_unwind(|| assert_secret("JWT_SECRET", "short-but-not-default"));
+        assert!(res.is_err(), "长度 < 32 在生产应 panic");
+        std::env::remove_var("APP_ENV");
+    }
+
+    #[test]
+    fn production_rejects_short_secret() {
+        let _g = env_lock().lock().unwrap();
+        std::env::set_var("APP_ENV", "production");
+        let short = "x".repeat(MIN_SECRET_LEN - 1);
+        let res = std::panic::catch_unwind(|| assert_secret("S", &short));
+        assert!(res.is_err());
+        let ok = "y".repeat(MIN_SECRET_LEN);
+        assert_eq!(assert_secret("S", &ok), ok);
         std::env::remove_var("APP_ENV");
     }
 

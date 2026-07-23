@@ -9,10 +9,12 @@
 
 use crate::config::Config;
 use crate::state::AppState;
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::routing::Router;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
-
+mod auth;
 mod config;
 mod error;
 mod routes;
@@ -20,9 +22,22 @@ mod state;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // 安全修复 4.2：生产或 LOG_FORMAT=json → JSON 结构化日志。
+    {
+        let filter = EnvFilter::from_default_env();
+        let use_json = sharpside_shared::secrets::is_production()
+            || std::env::var("LOG_FORMAT").ok().as_deref() == Some("json");
+        if use_json {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_current_span(false)
+                .with_span_list(false)
+                .init();
+        } else {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
 
     let config = Config::from_env();
     tracing::info!(listen = %config.listen_addr, "admin 启动");
@@ -40,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
             ServeDir::new("apps/admin/static")
                 .fallback(ServeFile::new("apps/admin/static/index.html")),
         )
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
@@ -69,4 +85,32 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("收到终止信号，开始优雅关停（排空在途请求）");
+}
+
+/// 安全修复 3.2：CSP + 安全响应头（与 web 同口径）。
+/// admin 无内联脚本，`script-src 'self'`；connect 同源防 token 外泄。
+async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; \
+             object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+        ),
+    );
+    h.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    h.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    res
 }

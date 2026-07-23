@@ -32,6 +32,10 @@ pub struct SignalEvent {
     /// 该 trader 已链接的 identity_id（若有）；identity 跟随靠此匹配
     #[serde(default)]
     pub identity_id: Option<Uuid>,
+    /// 逐笔信号 = 成交 ID（raw_trades.trade_id/tx_hash）；diff 信号 = None。
+    /// 与 venue-hub 侧共同决定 signal_id，避免同秒同 token 多笔撞键。
+    #[serde(default)]
+    pub source_id: Option<String>,
 }
 
 /// 派生出的待入队指令（含 skip_reason；Some 表示入队即 skipped）。
@@ -84,14 +88,22 @@ pub fn derive_copy_orders(
         if skip.is_none() {
             match config.sizing {
                 SizingMode::Fixed { amount } => {
-                    if event.price > 0.0 {
+                    // 安全修复 4.4：Fixed amount 须 > 0。
+                    if amount <= 0.0 {
+                        skip = Some(format!("Fixed amount 须 > 0，当前 {amount}"));
+                    } else if event.price > 0.0 {
                         size = amount / event.price;
                     } else {
                         skip = Some("Fixed sizing 但 price<=0".into());
                     }
                 }
                 SizingMode::Proportional { ratio } => {
-                    size = event.size * ratio;
+                    // 安全修复 4.4：Proportional ratio ∈ (0, 1]。
+                    if !(ratio > 0.0 && ratio <= 1.0) {
+                        skip = Some(format!("Proportional ratio 须 ∈ (0,1]，当前 {ratio}"));
+                    } else {
+                        size = event.size * ratio;
+                    }
                 }
             }
         }
@@ -141,7 +153,11 @@ fn match_relation(
         rel.follow_platform.as_deref(),
         rel.follow_address.as_deref(),
     ) {
-        if fp == event.platform.as_str() && fa == event.trader_id {
+        // 安全修复 4.4：匹配前归一地址（checksum vs 小写都能命中）。
+        let fa_norm = sharpside_shared::normalize_trader_id(fp, fa);
+        let event_norm =
+            sharpside_shared::normalize_trader_id(event.platform.as_str(), &event.trader_id);
+        if fp == event.platform.as_str() && fa_norm == event_norm {
             return MatchResult::Matched;
         }
         return MatchResult::NoMatch;
@@ -235,6 +251,7 @@ mod tests {
             size: 100.0,
             ts: Utc::now(),
             identity_id,
+            source_id: None,
         }
     }
 
@@ -351,6 +368,51 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("max_notional"));
+    }
+
+    /// 安全修复 4.4：checksum 地址与小写地址应匹配。
+    #[test]
+    fn trader_match_case_insensitive_for_chain() {
+        let user = Uuid::new_v4();
+        let rel = rel_trader(
+            user,
+            "polymarket",
+            "0xAbC123",
+            "polymarket",
+            cfg_fixed(50.0, false),
+        );
+        let ev = event(Platform::Polymarket, "0xabc123", None);
+        let out = derive_copy_orders(&ev, &[rel], &HashSet::new());
+        assert_eq!(out.len(), 1);
+        assert!(out[0].skip_reason.is_none());
+    }
+
+    /// 安全修复 4.4：ratio ≤0 或 >1 → skipped。
+    #[test]
+    fn proportional_ratio_out_of_bounds_skipped() {
+        let user = Uuid::new_v4();
+        for bad in [0.0, -0.5, 1.5] {
+            let cfg = FollowConfig {
+                sizing: SizingMode::Proportional { ratio: bad },
+                max_notional_per_order: 0.0,
+                daily_max_notional: 0.0,
+                max_open_positions: 0,
+                execute_venue: Platform::Polymarket,
+                channel: Channel::Daemon,
+                same_venue_only: false,
+            };
+            let rel = rel_trader(user, "polymarket", "0xabc", "polymarket", cfg);
+            let ev = event(Platform::Polymarket, "0xabc", None);
+            let out = derive_copy_orders(&ev, &[rel], &HashSet::new());
+            assert!(
+                out[0]
+                    .skip_reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("ratio"),
+                "ratio={bad} 应 skip"
+            );
+        }
     }
 
     #[test]

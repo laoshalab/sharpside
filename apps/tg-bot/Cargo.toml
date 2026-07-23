@@ -18,3 +18,4 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 teloxide = { version = "0.15.0", default-features = false, features = ["rustls", "ctrlc_handler", "macros"] }
+sharpside-shared.workspace = true

@@ -44,8 +44,10 @@ export async function portfolioPage() {
   function reload(patch) {
     Object.assign(state, patch);
     const qs = new URLSearchParams({ period: state.period }).toString();
-    location.hash = '#/portfolio?' + qs;
-    render();
+    const next = '#/portfolio?' + qs;
+    // hash 变更由 hashchange → 路由 remount；勿再调 render，否则双请求 + 闪屏。
+    if (location.hash === next) render();
+    else location.hash = next;
   }
 
   async function render() {
@@ -56,12 +58,12 @@ export async function portfolioPage() {
       lastPortfolio = p;
       kpiCard.innerHTML = '';
       kpiCard.appendChild(el('div', { class: 'kpi-grid' }, [
-        statCard({ label: t('portfolio.kpiTotalPnl'), value: fmtUSD(p.kpi.total_pnl), cls: pnlClass(p.kpi.total_pnl) }),
-        statCard({ label: t('portfolio.kpiTotalRoi'), value: fmtPct(p.kpi.total_roi), cls: pnlClass(p.kpi.total_roi) }),
-        statCard({ label: t('portfolio.kpiOpenMv'), value: fmtUSD(p.kpi.open_market_value) }),
-        statCard({ label: t('portfolio.kpiWinRate'), value: fmtPct(p.kpi.win_rate, 0) }),
-        statCard({ label: t('portfolio.kpiTradeCount'), value: fmtNum(p.kpi.trade_count, 0) }),
-        statCard({ label: t('portfolio.kpiUnrealized'), value: p.kpi.unrealized_pnl === 0 ? t('portfolio.needsMarketData') : fmtUSD(p.kpi.unrealized_pnl), sub: 'Phase 2' }),
+        statCard({ label: t('portfolio.kpiTotalPnl'), value: fmtUSD(p.kpi?.total_pnl), cls: pnlClass(p.kpi?.total_pnl) }),
+        statCard({ label: t('portfolio.kpiTotalRoi'), value: fmtPct(p.kpi?.total_roi), cls: pnlClass(p.kpi?.total_roi) }),
+        statCard({ label: t('portfolio.kpiOpenMv'), value: fmtUSD(p.kpi?.open_market_value) }),
+        statCard({ label: t('portfolio.kpiWinRate'), value: fmtPct(p.kpi?.win_rate, 0) }),
+        statCard({ label: t('portfolio.kpiTradeCount'), value: fmtNum(p.kpi?.trade_count, 0) }),
+        statCard({ label: t('portfolio.kpiUnrealized'), value: p.kpi?.unrealized_pnl === 0 ? t('portfolio.needsMarketData') : fmtUSD(p.kpi?.unrealized_pnl), sub: 'Phase 2' }),
       ]));
 
       // 钱包 + 可用资金（EOA / Deposit Wallet / pUSD 现金）。对应 §6.4 资产权/交易权口径。
@@ -80,8 +82,8 @@ export async function portfolioPage() {
       // 分跟随 / 分 Venue
       brkCard.innerHTML = '';
       brkCard.appendChild(el('div', { class: 'row' }, [
-        breakdownPanel(t('portfolio.perFollow'), p.per_follow.map(f => ({ label: f.follow_relation_id.slice(0, 8) + '…', pnl: f.pnl, share: f.share }))),
-        breakdownPanel(t('portfolio.perVenue'), p.per_venue.map(v => ({ label: v.venue, pnl: v.pnl, share: v.share }))),
+        breakdownPanel(t('portfolio.perFollow'), (p.per_follow || []).map(f => ({ label: String(f.follow_relation_id || '').slice(0, 8) + '…', pnl: f.pnl, share: f.share }))),
+        breakdownPanel(t('portfolio.perVenue'), (p.per_venue || []).map(v => ({ label: v.venue, pnl: v.pnl, share: v.share }))),
       ]));
 
       // 当前持仓明细（FIFO 重建后剩余 open lots，成本口径；无 mark price 故无未实现 PnL）
@@ -93,8 +95,8 @@ export async function portfolioPage() {
         posCard.appendChild(dataTable({
           columns: [
             { key: 'venue', label: 'Venue' },
-            { key: 'market_id', label: t('portfolio.colMarket'), render: r => `<span title="${escapeAttr(r.market_id)}">${escapeText(r.market_id).slice(0, 12)}…</span>` },
-            { key: 'token_id', label: 'Token', render: r => `<span title="${escapeAttr(r.token_id)}">${escapeText(r.token_id).slice(0, 10)}…</span>` },
+            { key: 'market_id', label: t('portfolio.colMarket'), render: r => `<span title="${escapeAttr(r.market_id || '')}">${escapeText(String(r.market_id || '')).slice(0, 12)}…</span>` },
+            { key: 'token_id', label: 'Token', render: r => `<span title="${escapeAttr(r.token_id || '')}">${escapeText(String(r.token_id || '')).slice(0, 10)}…</span>` },
             { key: 'size', label: t('portfolio.colSize'), render: r => fmtNum(r.size, 2) },
             { key: 'avg_cost', label: t('portfolio.colAvgCost'), render: r => fmtNum(r.avg_cost, 4) },
             { key: 'cost_basis', label: t('portfolio.colCostBasis'), render: r => fmtUSD(r.cost_basis) },
@@ -105,14 +107,15 @@ export async function portfolioPage() {
       }
 
       // 延迟分布
+      const lat = p.latency || {};
       latCard.innerHTML = '';
       latCard.appendChild(el('h3', { text: t('portfolio.latencyTitle') }));
       latCard.appendChild(el('p', { class: 'muted', text: t('portfolio.latencySummary', {
-        median: (p.latency.median_ms / 1000).toFixed(2),
-        p95: (p.latency.p95_ms / 1000).toFixed(2),
-        block0HitRate: p.latency.block0_enabled ? fmtPct(p.latency.block0_hit_rate, 0) : t('portfolio.block0Disabled'),
+        median: ((lat.median_ms || 0) / 1000).toFixed(2),
+        p95: ((lat.p95_ms || 0) / 1000).toFixed(2),
+        block0HitRate: lat.block0_enabled ? fmtPct(lat.block0_hit_rate, 0) : t('portfolio.block0Disabled'),
       }) }));
-      latCard.appendChild(latencyHistogram(p.latency.buckets));
+      latCard.appendChild(latencyHistogram(lat.buckets));
 
       // 近期成交
       execCard.innerHTML = '';
@@ -135,6 +138,10 @@ export async function portfolioPage() {
     } catch (e) {
       kpiCard.innerHTML = '';
       kpiCard.appendChild(el('p', { class: 'neg', text: t('portfolio.loadError', { message: e.message }) }));
+      for (const host of [walletCard, chartCard, brkCard, posCard, latCard, execCard]) {
+        host.innerHTML = '';
+        host.appendChild(el('p', { class: 'muted', text: '—' }));
+      }
     }
   }
 
@@ -214,14 +221,15 @@ function walletField(label, addr, hint) {
 }
 
 function latencyHistogram(buckets) {
-  const max = Math.max(1, ...buckets);
+  const list = Array.isArray(buckets) ? buckets : [];
+  const max = Math.max(1, ...list, 0);
   const bars = el('div', { style: 'display:flex;align-items:flex-end;gap:8px;height:120px;margin-top:12px' });
-  for (let i = 0; i < buckets.length; i++) {
-    const h = (buckets[i] / max) * 100;
+  for (let i = 0; i < Math.max(list.length, STEP_LABELS.length); i++) {
+    const h = ((list[i] || 0) / max) * 100;
     bars.appendChild(el('div', { style: 'flex:1;text-align:center' }, [
       el('div', { style: `height:${h}%;background:var(--c-accent);border-radius:4px 4px 0 0;min-height:2px` }),
-      el('div', { class: 'muted', style: 'font-size:11px;margin-top:4px', text: STEP_LABELS[i] }),
-      el('div', { class: 'muted', style: 'font-size:11px', text: String(buckets[i]) }),
+      el('div', { class: 'muted', style: 'font-size:11px;margin-top:4px', text: STEP_LABELS[i] || String(i) }),
+      el('div', { class: 'muted', style: 'font-size:11px', text: String(list[i] || 0) }),
     ]));
   }
   return bars;

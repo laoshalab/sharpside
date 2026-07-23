@@ -441,6 +441,33 @@ pub async fn update_copy_order_status(
     Ok(row)
 }
 
+/// 原子 CAS 转终态：仅当当前 status ∈ {pending, dispatched} 时置为 `new_status`，返回抢占到的行；
+/// 否则返回 None（已被先前上报 / worker 置终态 → 调用方幂等返回，不重复入账）。
+///
+/// 对应安全修复 1.4：`/result` 用此 CAS 抢占，重复上报幂等返回 200，不重复 insert copy_execution。
+pub async fn claim_copy_order_status(
+    pool: &PgPool,
+    id: Uuid,
+    new_status: &str,
+    skip_reason: Option<&str>,
+) -> Result<Option<CopyOrderRow>, DbError> {
+    let row = sqlx::query_as::<_, CopyOrderRow>(
+        r#"
+        UPDATE account.copy_order SET
+            status      = $2,
+            skip_reason = COALESCE($3, skip_reason)
+        WHERE id = $1 AND status IN ('pending', 'dispatched')
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(new_status)
+    .bind(skip_reason)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// 原子抢占一条 pending 指令：`pending → dispatched`，仅当当前仍为 pending 才成功。
 ///
 /// 多 copier worker 并发时，SELECT pending 后各自跑风控，最后用此 CAS 抢占：
@@ -529,6 +556,31 @@ pub async fn list_submitted_copy_orders(
     Ok(rows)
 }
 
+/// 安全修复 4.1：按 status 计数 copy_order（metrics）。
+pub async fn count_copy_orders_by_status(pool: &PgPool, status: &str) -> Result<i64, DbError> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM account.copy_order WHERE status = $1",
+    )
+    .bind(status)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+/// pending/dispatched 队列最大龄期（秒）；无行返回 0。
+pub async fn max_copy_order_age_secs(pool: &PgPool, status: &str) -> Result<f64, DbError> {
+    let row: (Option<f64>,) = sqlx::query_as(
+        r#"
+        SELECT EXTRACT(EPOCH FROM (now() - MIN(created_at)))::float8
+        FROM account.copy_order
+        WHERE status = $1
+        "#,
+    )
+    .bind(status)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0.unwrap_or(0.0))
+}
 
 /// 列出 dispatched_at 早于 cutoff 的 dispatched 指令（reclaim worker 用）。
 /// 这些指令疑似 copier 进程崩溃后卡死，需回收。
@@ -616,7 +668,9 @@ pub async fn insert_copy_execution(
     filled_price: f64,
     fee: f64,
     tx_hash: Option<&str>,
-) -> Result<CopyExecution, DbError> {
+) -> Result<Option<CopyExecution>, DbError> {
+    // 安全修复 1.4：ON CONFLICT (copy_order_id) DO NOTHING —— 同一 copy_order
+    // 重复上报 / 跨通道竞争时只写一条成交行。返回 None 表示已存在（幂等）。
     let to_dec = |v: f64| -> Result<rust_decimal::Decimal, DbError> {
         rust_decimal::Decimal::try_from(v).map_err(|e| DbError::Invalid(e.to_string()))
     };
@@ -626,6 +680,7 @@ pub async fn insert_copy_execution(
             (copy_order_id, user_id, venue, market_id, token_id, venue_order_id,
              side, filled_size, filled_price, fee, tx_hash)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        ON CONFLICT (copy_order_id) DO NOTHING
         RETURNING *
         "#,
     )
@@ -640,7 +695,7 @@ pub async fn insert_copy_execution(
     .bind(to_dec(filled_price)?)
     .bind(to_dec(fee)?)
     .bind(tx_hash)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
     Ok(row)
 }
@@ -824,6 +879,91 @@ pub async fn get_credential_blob(
 
 // ── user_venue_credentials ──
 
+/// upsert 凭证前：若已有行则整包写入 `credential_archives`（re-provision 可追溯）。
+/// 无现有行时为 no-op。返回是否归档了一行。
+pub async fn archive_credential_if_exists(
+    pool: &PgPool,
+    user_id: Uuid,
+    platform: &str,
+) -> Result<bool, DbError> {
+    let res = sqlx::query(
+        r#"
+        INSERT INTO account.credential_archives (
+            user_id, platform, kind, encrypted_blob, proxy_address,
+            revoked_at, revoked_by, original_created_at, original_updated_at
+        )
+        SELECT user_id, platform, kind, encrypted_blob, proxy_address,
+               revoked_at, revoked_by, created_at, updated_at
+        FROM account.user_venue_credentials
+        WHERE user_id = $1 AND platform = $2
+        "#,
+    )
+    .bind(user_id)
+    .bind(platform)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// 列出用户某平台的凭证归档（最近优先）。含密文 blob，调用方勿回传前端。
+pub async fn list_credential_archives(
+    pool: &PgPool,
+    user_id: Uuid,
+    platform: &str,
+    limit: i64,
+) -> Result<Vec<crate::CredentialArchive>, DbError> {
+    let lim = limit.clamp(1, 50);
+    let rows = sqlx::query_as::<_, crate::CredentialArchive>(
+        r#"
+        SELECT * FROM account.credential_archives
+        WHERE user_id = $1 AND platform = $2
+        ORDER BY archived_at DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(user_id)
+    .bind(platform)
+    .bind(lim)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 取单条归档（须属该用户）。含密文 blob。
+pub async fn get_credential_archive(
+    pool: &PgPool,
+    user_id: Uuid,
+    archive_id: i64,
+) -> Result<Option<crate::CredentialArchive>, DbError> {
+    let row = sqlx::query_as::<_, crate::CredentialArchive>(
+        r#"
+        SELECT * FROM account.credential_archives
+        WHERE id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(archive_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 取某 (user, platform) 的完整凭证行（含 revoked_at），供 provision 闸门判断。
+pub async fn get_credential(
+    pool: &PgPool,
+    user_id: Uuid,
+    platform: &str,
+) -> Result<Option<UserVenueCredential>, DbError> {
+    let row = sqlx::query_as::<_, UserVenueCredential>(
+        "SELECT * FROM account.user_venue_credentials WHERE user_id = $1 AND platform = $2",
+    )
+    .bind(user_id)
+    .bind(platform)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// upsert 某 (user, platform) 的加密凭证 blob。
 /// `kind` 从 `encrypted_blob.kind` 提取（缺省 `unknown`），写入列级公开字段。
 pub async fn upsert_credential(
@@ -840,7 +980,11 @@ pub async fn upsert_credential(
         ON CONFLICT (user_id, platform) DO UPDATE SET
             kind           = excluded.kind,
             encrypted_blob = excluded.encrypted_blob,
-            updated_at     = now()
+            updated_at     = now(),
+            -- 安全修复 2.2：重新预配 = 新 owner key 新凭证，重置撤销态（旧 revoke 不可逆，
+            -- 但新凭证是全新密钥，应可激活）。
+            revoked_at      = NULL,
+            revoked_by      = NULL
         RETURNING *
         "#,
     )
@@ -871,7 +1015,10 @@ pub async fn upsert_credential_with_proxy(
             kind           = excluded.kind,
             encrypted_blob = excluded.encrypted_blob,
             proxy_address  = excluded.proxy_address,
-            updated_at     = now()
+            updated_at     = now(),
+            -- 安全修复 2.2：重新预配 = 新 owner key 新凭证，重置撤销态。
+            revoked_at      = NULL,
+            revoked_by      = NULL
         RETURNING *
         "#,
     )
@@ -905,6 +1052,33 @@ pub async fn list_credentials(
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+// ── 凭证撤销（revoke，安全修复 2.2）──
+
+/// 撤销某 (user, platform) 凭证：置 revoked_at=now()、revoked_by=user_id。不可逆。
+/// 仅对当前活跃（revoked_at IS NULL）的凭证生效；已撤销则幂等返回（行不变）。
+/// 返回更新后的行（含 revoked_at）；无此凭证返回 None。
+pub async fn revoke_credential(
+    pool: &PgPool,
+    user_id: Uuid,
+    platform: &str,
+) -> Result<Option<UserVenueCredential>, DbError> {
+    let row = sqlx::query_as::<_, UserVenueCredential>(
+        r#"
+        UPDATE account.user_venue_credentials SET
+            revoked_at = now(),
+            revoked_by = $1,
+            updated_at = now()
+        WHERE user_id = $1 AND platform = $2 AND revoked_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(user_id)
+    .bind(platform)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 // ── 风控统计（copier 用）──
@@ -951,11 +1125,22 @@ pub async fn count_recent_copy_orders(
 }
 
 /// 某用户当前在途 + 已成交的 copy_order 数（近似持仓数，风控 max_open_positions 用）。
+/// 用户当前真实开仓数：按 token 聚合净持仓（buy filled − sell filled），仅净持仓 ≠ 0 的 token 计为 1 个开仓。
+///
+/// 安全修复 1.5：旧实现 `status IN ('pending','dispatched','filled')` 把所有历史 filled
+/// 都算活跃 → 一轮往返（buy 后 sell）后 open_positions 永不减，`max_open_positions` 永久耗尽。
+/// 改以 `copy_execution`（真实成交）净持仓为准：buy 10 + sell 10 同 token → net 0 → 不计。
 pub async fn count_active_copy_orders(pool: &PgPool, user_id: Uuid) -> Result<i64, DbError> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
-        SELECT COUNT(*) FROM account.copy_order
-        WHERE user_id = $1 AND status IN ('pending', 'dispatched', 'filled')
+        SELECT count(*) FROM (
+            SELECT token_id,
+                   SUM(CASE WHEN side = 'buy' THEN filled_size ELSE -filled_size END) AS net
+            FROM account.copy_execution
+            WHERE user_id = $1
+            GROUP BY token_id
+            HAVING SUM(CASE WHEN side = 'buy' THEN filled_size ELSE -filled_size END) <> 0
+        ) AS open_tokens
         "#,
     )
     .bind(user_id)
@@ -1002,14 +1187,25 @@ pub async fn sum_daily_notional_for_follow(
 }
 
 /// 某跟随关系当前在途 + 已成交的 copy_order 数（per-follow max_open_positions 强制用）。
+/// 某跟随关系当前真实开仓数：按 token 聚合净持仓（buy − sell），净持仓 ≠ 0 的 token 计 1。
+///
+/// 安全修复 1.5：与 `count_active_copy_orders` 同口径，旧实现把历史 filled 全计活跃，
+/// 往返后永不减。改以 `copy_execution` 净持仓为准（join copy_order 取 follow_relation_id）。
 pub async fn count_active_copy_orders_for_follow(
     pool: &PgPool,
     follow_relation_id: Uuid,
 ) -> Result<i64, DbError> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
-        SELECT COUNT(*) FROM account.copy_order
-        WHERE follow_relation_id = $1 AND status IN ('pending', 'dispatched', 'filled')
+        SELECT count(*) FROM (
+            SELECT e.token_id,
+                   SUM(CASE WHEN e.side = 'buy' THEN e.filled_size ELSE -e.filled_size END) AS net
+            FROM account.copy_execution e
+            JOIN account.copy_order o ON o.id = e.copy_order_id
+            WHERE o.follow_relation_id = $1
+            GROUP BY e.token_id
+            HAVING SUM(CASE WHEN e.side = 'buy' THEN e.filled_size ELSE -e.filled_size END) <> 0
+        ) AS open_tokens
         "#,
     )
     .bind(follow_relation_id)
@@ -1190,19 +1386,60 @@ pub async fn issue_nonce(pool: &PgPool, address: &str, nonce: &str) -> Result<()
     Ok(())
 }
 
-/// 原子消费 nonce：仅当未消费时标记 consumed_at 并返回 true。
-/// 防重放——同一 (address, nonce) 第二次返回 false。
-pub async fn consume_nonce(pool: &PgPool, address: &str, nonce: &str) -> Result<bool, DbError> {
+/// 原子消费 nonce：仅当未消费且未过期时标记 consumed_at 并返回 true。
+/// 防重放——同一 (address, nonce) 第二次返回 false；超过 `max_age_secs` 的行不可消费。
+pub async fn consume_nonce(
+    pool: &PgPool,
+    address: &str,
+    nonce: &str,
+    max_age_secs: i64,
+) -> Result<bool, DbError> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs.max(0));
     let res = sqlx::query(
         r#"UPDATE account.auth_nonces
            SET consumed_at = now()
-           WHERE address = $1 AND nonce = $2 AND consumed_at IS NULL"#,
+           WHERE address = $1 AND nonce = $2 AND consumed_at IS NULL
+             AND issued_at > $3"#,
     )
     .bind(address)
     .bind(nonce)
+    .bind(cutoff)
     .execute(pool)
     .await?;
     Ok(res.rows_affected() > 0)
+}
+
+/// 清理过期 / 陈旧 nonce 行（issued_at 早于 max_age）。best-effort，在签发时顺带调用。
+pub async fn cleanup_stale_nonces(pool: &PgPool, max_age_secs: i64) -> Result<u64, DbError> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs.max(0));
+    let res = sqlx::query("DELETE FROM account.auth_nonces WHERE issued_at < $1")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+// ── jwt_denylist（JWT 吊销，对应安全修复 1.2）──
+
+/// 吊销一个 JWT：写入其 jti。已存在则幂等（ON CONFLICT DO NOTHING）。
+pub async fn revoke_jwt(pool: &PgPool, jti: &str, user_id: Uuid) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO account.jwt_denylist (jti, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(jti)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 查询 jti 是否已被吊销。命中返回 true。点查走主键索引。
+pub async fn is_jwt_revoked(pool: &PgPool, jti: &str) -> Result<bool, DbError> {
+    let res = sqlx::query("SELECT 1 FROM account.jwt_denylist WHERE jti = $1")
+        .bind(jti)
+        .fetch_optional(pool)
+        .await?;
+    Ok(res.is_some())
 }
 
 // ── withdrawals（提现审计）──
@@ -1309,8 +1546,8 @@ pub async fn daily_withdrawal_total(
 // 对应 docs/CHANNEL_A_SIGNING.md §4.2 与 migration 0025。赎回 = 已结算市场赢仓位换 pUSD。
 // 自动 worker（source=auto）与手动端点（source=manual）共用本表。
 
-/// 插入一笔赎回记录（status=pending）。唯一约束冲突（同 user+condition+outcome 已有 pending/mined）
-/// 返回 `DbError::Conflict`，调用方据此跳过重复赎回。
+/// 插入一笔赎回记录（status=pending）。唯一约束冲突（同 user+condition+outcome+deposit_wallet
+/// 已有 pending/mined）返回 `DbError::Conflict`，调用方据此跳过重复赎回。
 pub async fn insert_redemption(
     pool: &PgPool,
     user_id: Uuid,
@@ -1320,12 +1557,13 @@ pub async fn insert_redemption(
     token_id: &str,
     amount: rust_decimal::Decimal,
     source: &str,
+    deposit_wallet: &str,
 ) -> Result<Redemption, DbError> {
     sqlx::query_as::<_, Redemption>(
         r#"
         INSERT INTO account.redemptions
-            (user_id, venue, condition_id, outcome, token_id, amount, source, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+            (user_id, venue, condition_id, outcome, token_id, amount, source, status, deposit_wallet)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
         RETURNING *
         "#,
     )
@@ -1336,11 +1574,12 @@ pub async fn insert_redemption(
     .bind(token_id)
     .bind(amount)
     .bind(source)
+    .bind(deposit_wallet)
     .fetch_one(pool)
     .await
     .map_err(|e| match e {
         sqlx::Error::Database(ref de) if de.is_unique_violation() => DbError::Conflict(format!(
-            "redemption {venue}/{condition_id}/{outcome} 已存在（pending/mined）"
+            "redemption {venue}/{condition_id}/{outcome}/{deposit_wallet} 已存在（pending/mined）"
         )),
         other => other.into(),
     })
@@ -1391,18 +1630,20 @@ pub async fn list_redemptions(
     Ok(rows)
 }
 
-/// 取用户在某市场某 outcome 是否已有 pending/mined 赎回（防重复，手动端点 + worker 共用）。
+/// 取用户在某市场某 outcome、某 deposit_wallet 是否已有 pending/mined 赎回。
 pub async fn redemption_exists_active(
     pool: &PgPool,
     user_id: Uuid,
     condition_id: &str,
     outcome: &str,
+    deposit_wallet: &str,
 ) -> Result<bool, DbError> {
     let (exists,): (bool,) = sqlx::query_as(
         r#"
         SELECT EXISTS(
             SELECT 1 FROM account.redemptions
             WHERE user_id = $1 AND condition_id = $2 AND outcome = $3
+              AND deposit_wallet = $4
               AND status IN ('pending', 'mined')
         )
         "#,
@@ -1410,6 +1651,7 @@ pub async fn redemption_exists_active(
     .bind(user_id)
     .bind(condition_id)
     .bind(outcome)
+    .bind(deposit_wallet)
     .fetch_one(pool)
     .await?;
     Ok(exists)

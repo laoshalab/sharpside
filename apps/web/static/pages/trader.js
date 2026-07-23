@@ -46,12 +46,15 @@ export async function traderPage({ params }) {
   }
 
   c.innerHTML = '';
-  // 头部
+  // 头部：标签 + 外链 + 跟随/观察 同一行，小间距对齐
+  const actions = el('div', { class: 'row trader-actions' }, [
+    tagChips(trader.is_hot ? [t('trader.tagHot')] : []),
+    tagChips(perf?.tags || trader.tags || []),
+  ]);
   const head = el('div', { class: 'card' }, [
     el('h1', { text: traderLabel(trader) }),
     el('p', { class: 'muted', text: `${trader.platform} · ${trader.address}` }),
-    tagChips(trader.is_hot ? [t('trader.tagHot')] : []),
-    tagChips(perf?.tags || trader.tags || []),
+    actions,
   ]);
   c.appendChild(head);
 
@@ -65,7 +68,7 @@ export async function traderPage({ params }) {
   // 官方主页外链（如 Polymarket profile）
   const officialUrl = venueOfficialProfileUrl(platform, address);
   if (officialUrl) {
-    head.appendChild(el('button', {
+    actions.appendChild(el('button', {
       class: 'sm',
       text: platform === 'polymarket' ? 'Polymarket ↗' : t('trader.officialProfile'),
       title: t('trader.officialTitle'),
@@ -75,8 +78,8 @@ export async function traderPage({ params }) {
 
   // 跟随 / 观察 按钮
   if (isLoggedIn()) {
-    head.appendChild(el('button', { class: 'primary', text: t('trader.follow'), onclick: () => navigate(`/follows/new?platform=${encodeURIComponent(platform)}&address=${encodeURIComponent(address)}`) }));
-    head.appendChild(el('button', { class: 'sm', text: t('trader.watch'), onclick: async () => {
+    actions.appendChild(el('button', { class: 'sm primary', text: t('trader.follow'), onclick: () => navigate(`/follows/new?platform=${encodeURIComponent(platform)}&address=${encodeURIComponent(address)}`) }));
+    actions.appendChild(el('button', { class: 'sm', text: t('trader.watch'), onclick: async () => {
       try {
         await createWatchlist({ watch_platform: platform, watch_address: address });
         toast(t('trader.watchAdded'), 'success');
@@ -87,8 +90,8 @@ export async function traderPage({ params }) {
       }
     } }));
   } else {
-    head.appendChild(el('button', {
-      class: 'primary',
+    actions.appendChild(el('button', {
+      class: 'sm primary',
       text: t('trader.connectToFollow'),
       onclick: async () => {
         try {
@@ -123,6 +126,7 @@ export async function traderPage({ params }) {
   c.appendChild(kpiHost);
 
   c.appendChild(el('h2', { text: t('trader.equityTitle') }));
+  c.appendChild(el('p', { class: 'muted', text: t('trader.equitySub'), style: 'margin-top:-6px;margin-bottom:10px' }));
   const chartCard = el('div', { class: 'card' }, [skeleton(2)]);
   c.appendChild(chartCard);
 
@@ -146,13 +150,14 @@ export async function traderPage({ params }) {
     // 官方盈亏：排行榜优先；非榜地址用 /value 周期 delta 兜底；皆无则回落自算。
     const officialPnl = row.official_pnl != null ? Number(row.official_pnl) : null;
     const officialSrc = row.official_source || '';
+    const freshness = officialAgeLabel(row.official_pnl_at);
     const officialSub = officialSrc === 'polymarket_value_delta'
-      ? t('trader.officialPnlSubDelta')
-      : t('trader.officialPnlSubLb');
+      ? [t('trader.officialPnlSubDelta'), freshness].filter(Boolean).join(' · ')
+      : [t('trader.officialPnlSubLb'), freshness].filter(Boolean).join(' · ');
     const pnlCard = officialPnl != null
       ? statCard({ label: t('trader.officialPnl'), value: fmtUSD(officialPnl), cls: pnlClass(officialPnl), sub: officialSub })
       : statCard({ label: t('trader.realizedPnl'), value: fmtUSD(row.realized_pnl), cls: pnlClass(row.realized_pnl), sub: t('trader.realizedNoOfficial') });
-    kpiHost.appendChild(el('div', { class: 'kpi-grid' }, [
+    kpiHost.appendChild(el('div', { class: 'kpi-grid kpi-grid--row' }, [
       statCard({ label: `ROI (${period})`, value: fmtPct(row.roi), cls: pnlClass(row.roi) }),
       statCard({ label: 'Sharpe', value: fmtNum(row.sharpe) }),
       statCard({ label: t('trader.winRate'), value: fmtPct(row.win_rate, 0) }),
@@ -163,6 +168,18 @@ export async function traderPage({ params }) {
       statCard({ label: t('trader.openPositions'), value: fmtNum(row.open_positions, 0) }),
       statCard({ label: t('trader.positionCount'), value: fmtNum(row.position_count, 0) }),
     ]));
+  }
+
+  /** 官方盈亏新鲜度副标（基于 official_pnl_at）。 */
+  function officialAgeLabel(iso) {
+    if (!iso) return '';
+    const ms = Date.now() - new Date(iso).getTime();
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    const mins = Math.floor(ms / 60000);
+    if (mins < 60) return t('trader.officialFreshMins', { n: Math.max(0, mins) });
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 48) return t('trader.officialFreshHours', { n: hrs });
+    return t('trader.officialFreshDays', { n: Math.floor(hrs / 24) });
   }
 
   function renderCurve(period) {
@@ -206,7 +223,8 @@ export async function traderPage({ params }) {
     } else {
       posCard.appendChild(dataTable({
         columns: [
-          { key: 'token_id', label: 'Token ID', render: r => `<code>${escapeHtml(r.token_id.slice(0, 12))}…</code>` },
+          { key: 'market_title', label: t('trader.colMarket'), render: r => renderMarketCell(platform, r) },
+          { key: 'outcome', label: t('trader.colOutcome'), render: r => r.outcome ? escapeHtml(r.outcome) : '—' },
           { key: 'final_open_size', label: t('trader.colSize'), render: r => fmtNum(r.final_open_size, 4) },
           { key: 'avg_cost', label: t('trader.colAvgCost'), render: r => fmtNum(r.avg_cost, 4) },
           { key: 'opened_at', label: t('trader.colOpenedAt'), render: r => fmtTs(r.opened_at) },
@@ -339,6 +357,27 @@ function venueOfficialProfileUrl(platform, address) {
   if (!addr) return null;
   if (platform === 'polymarket') return `https://polymarket.com/profile/${encodeURIComponent(addr)}`;
   return null;
+}
+
+/// Venue 市场页 URL（优先 event slug）。未知平台 / 无 slug 返回 null。
+function venueMarketUrl(platform, eventSlug, marketSlug) {
+  const slug = String(eventSlug || marketSlug || '').trim();
+  if (!slug) return null;
+  if (platform === 'polymarket') return `https://polymarket.com/event/${encodeURIComponent(slug)}`;
+  return null;
+}
+
+/// 持仓「市场」列：标题（可点外链）+ token_id tooltip；无标题时回退截断 token_id。
+function renderMarketCell(platform, r) {
+  const title = (r.market_title && String(r.market_title).trim())
+    || (r.token_id ? `${String(r.token_id).slice(0, 12)}…` : '—');
+  const tip = r.token_id || r.condition_id || title;
+  const url = venueMarketUrl(platform, r.event_slug, r.market_slug);
+  const text = escapeHtml(title);
+  if (url) {
+    return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(tip)}">${text}</a>`;
+  }
+  return `<span title="${escapeHtml(tip)}">${text}</span>`;
 }
 
 // ── 机器人检测面板 ──

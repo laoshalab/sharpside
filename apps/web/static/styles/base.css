@@ -583,8 +583,26 @@ button.ghost:hover { border-color: var(--c-muted); color: var(--c-text); }
 }
 .chip.accent { background: var(--c-accent); color: #04110e; border-color: var(--c-accent); font-weight: 600; }
 
+/* 交易员页头部操作行：标签 / 外链 / 跟随 / 观察 */
+.trader-actions {
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.trader-actions > span { display: inline-flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.trader-actions .chip { margin: 0; }
+.trader-actions button { margin: 0; }
+
 /* KPI 卡网格 */
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--sp-3); }
+.kpi-grid--row {
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+.kpi-grid--row .kpi { padding: var(--sp-2) var(--sp-2) var(--sp-2) calc(var(--sp-2) + 2px); }
+.kpi-grid--row .kpi .label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi-grid--row .kpi .value { font-size: var(--fs-16); }
+.kpi-grid--row .kpi .sub { font-size: 10px; line-height: 1.3; }
 .kpi {
   background: linear-gradient(160deg, var(--c-surface-2) 0%, var(--c-surface) 100%);
   border: 1px solid var(--c-border);
@@ -1550,6 +1568,7 @@ ol.install-steps .step-body { display: flex; gap: var(--sp-2); align-items: cent
   .bottom-tab-action { color: var(--c-accent-2); }
   .container { padding-top: var(--sp-3); padding-bottom: var(--sp-3); }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .kpi-grid--row { grid-template-columns: repeat(2, 1fr); }
   .nav { overflow-x: auto; }
   table { font-size: var(--fs-12); }
   th, td { padding: var(--sp-1) var(--sp-2); }

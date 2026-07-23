@@ -5,9 +5,11 @@
 //! KMS：LocalKms（生产）/ DevKms（dev，SHARPSIDE_KMS_DEV_PLAINTEXT=1）。
 
 mod auth;
+mod billing;
 mod config;
 mod deposit;
 mod error;
+mod migrate;
 mod rate_limit;
 mod routes;
 mod siwe;
@@ -21,9 +23,22 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // 安全修复 4.2：生产或 LOG_FORMAT=json → JSON 结构化日志。
+    {
+        let filter = EnvFilter::from_default_env();
+        let use_json = sharpside_shared::secrets::is_production()
+            || std::env::var("LOG_FORMAT").ok().as_deref() == Some("json");
+        if use_json {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_current_span(false)
+                .with_span_list(false)
+                .init();
+        } else {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
 
     let config = Config::from_env();
     tracing::info!(listen = %config.listen_addr, "account 启动");
@@ -59,13 +74,38 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let state = AppState::new(config.clone(), db, kms);
+
+    let mut workers = tokio::task::JoinSet::new();
+    {
+        let billing_state = state.clone();
+        workers.spawn(async move {
+            crate::billing::worker::run(billing_state).await;
+        });
+        tracing::info!(
+            enabled = config.billing_worker_enabled,
+            billing_configured = config.billing_enabled(),
+            "worker 已启动：billing（receipt + getLogs 认领 + 过期）"
+        );
+    }
+
     let app = routes::router(state);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!(listen = %config.listen_addr, "account HTTP 监听");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    tokio::select! {
+        result = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal()) => {
+            result?;
+        }
+        _ = workers.join_next() => {
+            tracing::error!("billing worker 意外退出");
+        }
+    }
+    workers.abort_all();
+    while workers.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -87,5 +127,5 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    tracing::info!("收到终止信号，开始优雅关停（排空在途请求）");
+    tracing::info!("收到终止信号，开始优雅关停（排空在途请求 + 中止 worker）");
 }

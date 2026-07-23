@@ -9,6 +9,8 @@
 ✅ **Phase 1a · MVP 闭环已落地**（Polymarket only，通道 B daemon 闭环，最小 web）
 🚧 **Phase 1b · 双通道补齐进行中**（admin 后台 + 影子模式 + 完整风控已落地；通道 A TG bot 真实现待 teloxide）
 
+> **发布范围定案：** 近期目标仅为 **Channel A 受控灰测**。公开 Channel B（公域 daemon）与营销/公域上线 **不上线**。通道 B 工程能力可自测，不作为对外发布项。
+
 ### Phase 1a 落地进度
 
 | Step | 模块 | 状态 |

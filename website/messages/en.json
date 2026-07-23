@@ -70,7 +70,8 @@
       "getting-started": "Getting started",
       "architecture": "Architecture",
       "operations": "Operations"
-    }
+    },
+    "localeFallbackNotice": "Docs for this language are not available yet; showing Chinese content."
   },
   "pages": {
     "copy": {

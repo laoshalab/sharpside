@@ -108,8 +108,11 @@ export async function leaderboardPage({ params }) {
     if (state.platform) qs.set('platform', state.platform);
     if (state.q_text) qs.set('q', state.q_text);
     if (state.offset) qs.set('offset', String(state.offset));
-    location.hash = '#/leaderboard?' + qs.toString();
-    renderTable();
+    const next = '#/leaderboard?' + qs.toString();
+    // hash 变更由 hashchange → 路由 remount；勿再调 renderTable，否则双请求 + 闪屏。
+    // 同 hash（如重复点当前筛选）浏览器不触发 hashchange，才本地刷新。
+    if (location.hash === next) renderTable();
+    else location.hash = next;
   }
 
   async function renderTable() {

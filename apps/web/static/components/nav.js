@@ -3,7 +3,7 @@
 import { el } from './ui.js';
 import { isLoggedIn, clearToken } from '../store/auth.js';
 import { navigate, isActive } from '../router.js';
-import { listWallets } from '../lib/account.js';
+import { listWallets, logout } from '../lib/account.js';
 import { connectWalletFlow } from '../lib/wallet-connect.js';
 import { toast } from '../store/toast.js';
 import { t } from '../i18n/index.js';
@@ -135,7 +135,13 @@ function buildTopNav() {
     actions.appendChild(el('button', {
       class: 'sm ghost',
       text: t('nav.disconnect'),
-      onclick: () => { clearToken(); navigate('/'); },
+      onclick: async () => {
+        // 先通知后端吊销 JWT（写 denylist），再清本地 token。
+        // 失败不阻塞本地登出（token 30min 后自然过期）。
+        try { await logout(); } catch { /* best-effort */ }
+        clearToken();
+        navigate('/');
+      },
     }));
   } else {
     const btn = el('button', { class: 'sm primary nav-connect', text: t('nav.connectWallet') });

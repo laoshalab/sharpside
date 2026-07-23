@@ -81,9 +81,11 @@ function watchCard(w, reload) {
     ? t('watchlist.identityPrefix', { id: String(w.watch_identity_id).slice(0, 8) })
     : traderLabel({ address: w.watch_address });
   const platform = w.watch_platform || '—';
-  const href = !isIdentity && w.watch_platform && w.watch_address
-    ? `#/traders/${encodeURIComponent(w.watch_platform)}/${encodeURIComponent(w.watch_address)}`
-    : '#/watchlist';
+  const href = isIdentity && w.watch_identity_id
+    ? `#/identities/${encodeURIComponent(w.watch_identity_id)}`
+    : (!isIdentity && w.watch_platform && w.watch_address
+      ? `#/traders/${encodeURIComponent(w.watch_platform)}/${encodeURIComponent(w.watch_address)}`
+      : '#/watchlist');
 
   card.appendChild(el('div', { class: 'fc-head' }, [
     el('div', { class: 'fc-title' }, [el('a', { href, text: `${target} · ${platform}` })]),

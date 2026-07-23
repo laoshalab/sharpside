@@ -24,11 +24,16 @@ use uuid::Uuid;
 #[allow(dead_code)]
 type HmacSha256 = Hmac<Sha256>;
 
-/// JWT claims。`sub` = user_id。
+/// JWT claims。`sub` = user_id，`jti` = 唯一 ID（用于吊销），`iat` = 签发时间。
+///
+/// `jti` 必填：无 jti 的旧 token 解码失败 → 强制重新登录。这保证所有在途 token
+/// 都可被 denylist 精确吊销（对应安全修复 1.2）。
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub exp: usize,
+    pub jti: String,
+    pub iat: usize,
 }
 
 /// 鉴权后的用户身份（handler extractor）。
@@ -37,12 +42,15 @@ pub struct AuthUser {
     pub user_id: Uuid,
 }
 
-/// 签发 JWT。
+/// 签发 JWT。`jti` 用随机 UUID，写入 denylist 即可吊销。
 pub fn issue_jwt(user_id: Uuid, secret: &str, ttl_seconds: i64) -> Result<String, ApiError> {
+    let now = Utc::now().timestamp() as usize;
     let exp = (Utc::now() + Duration::seconds(ttl_seconds)).timestamp() as usize;
     let claims = Claims {
         sub: user_id.to_string(),
         exp,
+        jti: Uuid::new_v4().to_string(),
+        iat: now,
     };
     let token = encode(
         &Header::new(Algorithm::HS256),
@@ -53,8 +61,9 @@ pub fn issue_jwt(user_id: Uuid, secret: &str, ttl_seconds: i64) -> Result<String
     Ok(token)
 }
 
-/// 校验 JWT，返回 user_id。
-pub fn verify_jwt(token: &str, secret: &str) -> Result<Uuid, ApiError> {
+/// 校验 JWT 签名 + exp，返回 Claims（含 jti）。**不查 denylist**——吊销检查由
+/// `AuthUser` extractor 在拿到 jti 后做（避免纯校验函数依赖 DB）。
+pub fn verify_jwt(token: &str, secret: &str) -> Result<Claims, ApiError> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     let data = decode::<Claims>(
@@ -63,10 +72,7 @@ pub fn verify_jwt(token: &str, secret: &str) -> Result<Uuid, ApiError> {
         &validation,
     )
     .map_err(|_| ApiError::Unauthorized("invalid or expired token".into()))?;
-    data.claims
-        .sub
-        .parse::<Uuid>()
-        .map_err(|_| ApiError::Unauthorized("invalid subject".into()))
+    Ok(data.claims)
 }
 
 /// 从 `Authorization: Bearer <token>` 提取并校验。
@@ -82,6 +88,21 @@ fn extract_bearer(parts: &Parts) -> Result<String, ApiError> {
     Ok(token.trim().to_string())
 }
 
+/// 安全修复 3.1：优先从 HttpOnly cookie `sharpside_token` 取 token（浏览器路径，JS 不可读），
+/// 回退 `Authorization: Bearer`（程序化客户端 / 过渡兼容）。
+fn extract_token(parts: &Parts) -> Result<String, ApiError> {
+    if let Some(cookie) = parts
+        .headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+    {
+        if let Some(t) = sharpside_shared::session::extract_token_from_cookie_header(cookie) {
+            return Ok(t);
+        }
+    }
+    extract_bearer(parts)
+}
+
 #[async_trait]
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = axum::response::Response;
@@ -90,9 +111,20 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token = extract_bearer(parts).map_err(|e| e.into_response())?;
-        let user_id =
-            verify_jwt(&token, &state.config.jwt_secret).map_err(|e| e.into_response())?;
+        let token = extract_token(parts).map_err(|e| e.into_response())?;
+        let claims = verify_jwt(&token, &state.config.jwt_secret).map_err(|e| e.into_response())?;
+        let user_id = claims
+            .sub
+            .parse::<Uuid>()
+            .map_err(|e| ApiError::Unauthorized(format!("invalid subject: {e}")).into_response())?;
+        // 吊销检查（denylist）：命中即拒。这是「登出后旧 token 立即失效」的强制点。
+        // 点查走 jwt_denylist 主键索引，<1ms。
+        if sharpside_db::queries::account::is_jwt_revoked(&state.db, &claims.jti)
+            .await
+            .map_err(|e| ApiError::Db(e).into_response())?
+        {
+            return Err(ApiError::Unauthorized("token revoked".into()).into_response());
+        }
         Ok(AuthUser { user_id })
     }
 }
@@ -248,8 +280,9 @@ mod tests {
     fn jwt_issue_and_verify_round_trip() {
         let uid = Uuid::new_v4();
         let token = issue_jwt(uid, "secret", 60).unwrap();
-        let back = verify_jwt(&token, "secret").unwrap();
-        assert_eq!(back, uid);
+        let claims = verify_jwt(&token, "secret").unwrap();
+        assert_eq!(claims.sub, uid.to_string());
+        assert!(!claims.jti.is_empty(), "jti 非空");
     }
 
     #[test]
@@ -267,6 +300,8 @@ mod tests {
         let claims = Claims {
             sub: uid.to_string(),
             exp,
+            jti: Uuid::new_v4().to_string(),
+            iat: exp,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
@@ -275,6 +310,20 @@ mod tests {
         )
         .unwrap();
         assert!(verify_jwt(&token, "secret").is_err());
+    }
+
+    #[test]
+    fn jwt_without_jti_rejected() {
+        // 无 jti 的旧 token 须被拒（强制重新登录以保证可吊销）。
+        let exp = (Utc::now() + Duration::seconds(60)).timestamp() as usize;
+        let claims = serde_json::json!({ "sub": Uuid::new_v4().to_string(), "exp": exp });
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"secret"),
+        )
+        .unwrap();
+        assert!(verify_jwt(&token, "secret").is_err(), "无 jti 的 token 应被拒");
     }
 
     #[test]

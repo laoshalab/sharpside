@@ -37,7 +37,9 @@ pub async fn insert_value_snapshot(
 }
 
 /// 选一批需要刷新 `/value` 快照的 visible 交易者：从未快照过或最近 `min_age` 内无快照。
-/// 按「最久未快照」优先（`NULLS FIRST`），每 tick 只拉 `limit` 个，自然轮转且对 rate limit 友好。
+///
+/// 优先级（高→低）：从未快照 → 缺 1d/1w/1m 官方盈亏 → 热钥 → 最久未快照。
+/// 每 tick 只拉 `limit` 个，对 rate limit 友好，同时让导入/缺官方数据的地址更快成熟。
 pub async fn pick_value_snapshot_candidates(
     pool: &PgPool,
     platform: &str,
@@ -53,9 +55,24 @@ pub async fn pick_value_snapshot_candidates(
             FROM trader_hub.trader_value_snapshot s
             WHERE s.platform = t.platform AND s.address = t.address
         ) s ON true
+        LEFT JOIN LATERAL (
+            SELECT EXISTS (
+                SELECT 1
+                FROM trader_hub.trader_performance p
+                WHERE p.platform = t.platform
+                  AND p.address = t.address
+                  AND p.category = 'OVERALL'
+                  AND p.period IN ('1d', '1w', '1m')
+                  AND p.official_pnl IS NOT NULL
+            ) AS has_official
+        ) o ON true
         WHERE t.platform = $1 AND t.visibility = 'visible'
           AND (s.last_ts IS NULL OR s.last_ts < $2)
-        ORDER BY s.last_ts ASC NULLS FIRST
+        ORDER BY
+          CASE WHEN s.last_ts IS NULL THEN 0 ELSE 1 END,
+          CASE WHEN COALESCE(o.has_official, false) THEN 1 ELSE 0 END,
+          CASE WHEN t.is_hot THEN 0 ELSE 1 END,
+          s.last_ts ASC NULLS FIRST
         LIMIT $3
         "#,
     )
@@ -67,8 +84,20 @@ pub async fn pick_value_snapshot_candidates(
     Ok(rows)
 }
 
-/// 算某 `(platform, address)` 在 `since` 之后窗口内的估值 delta：
-/// `latest.value - earliest(>= since).value`。需至少 2 个点且最早点在窗口内，否则返回 None。
+/// `/value` 周期 delta 结果（含覆盖率，便于 worker 门控短窗口假数据）。
+#[derive(Debug, Clone)]
+pub struct ValueDelta {
+    pub delta: f64,
+    /// 快照覆盖的窗口占比：`covered / (now - since)`，通常 ∈ (0, 1]，冷启动可更低。
+    pub coverage: f64,
+    pub base_ts: chrono::DateTime<chrono::Utc>,
+    pub latest_ts: chrono::DateTime<chrono::Utc>,
+}
+
+/// 算某 `(platform, address)` 在 period 窗口内的估值 delta。
+///
+/// 基线优先取 `ts ≤ since` 最近一点（更接近「周期起点」）；若无则回落窗口内最早点。
+/// `delta = latest.value - baseline.value`。需至少 2 个不同时点，否则返回 None。
 ///
 /// 口径：持仓 MTM 变化，**含出入金**（存入会抬高 value，提出会压低）。前端副标明示此口径，
 /// 精确扣除现金流留给 Phase 3C（接 `/activity`）。
@@ -77,23 +106,39 @@ pub async fn value_delta_since(
     platform: &str,
     address: &str,
     since: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<f64>, DbError> {
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ValueDelta>, DbError> {
     #[derive(sqlx::FromRow)]
     struct V {
         ts: chrono::DateTime<chrono::Utc>,
         value: Decimal,
     }
-    // 窗口内最早一点（近似 period 起点）。
-    let earliest = sqlx::query_as::<_, V>(
+    // 优先：cutoff 前最近一点（≈ 周期起点估值）。
+    let before = sqlx::query_as::<_, V>(
         "SELECT ts, value FROM trader_hub.trader_value_snapshot \
-         WHERE platform = $1 AND address = $2 AND ts >= $3 \
-         ORDER BY ts ASC LIMIT 1",
+         WHERE platform = $1 AND address = $2 AND ts <= $3 \
+         ORDER BY ts DESC LIMIT 1",
     )
     .bind(platform)
     .bind(address)
     .bind(since)
     .fetch_optional(pool)
     .await?;
+    // 回落：窗口内最早一点（冷启动尚无 cutoff 前快照时）。
+    let baseline = if before.is_some() {
+        before
+    } else {
+        sqlx::query_as::<_, V>(
+            "SELECT ts, value FROM trader_hub.trader_value_snapshot \
+             WHERE platform = $1 AND address = $2 AND ts >= $3 \
+             ORDER BY ts ASC LIMIT 1",
+        )
+        .bind(platform)
+        .bind(address)
+        .bind(since)
+        .fetch_optional(pool)
+        .await?
+    };
     // 最新一点（≈ now）。
     let latest = sqlx::query_as::<_, V>(
         "SELECT ts, value FROM trader_hub.trader_value_snapshot \
@@ -104,14 +149,26 @@ pub async fn value_delta_since(
     .bind(address)
     .fetch_optional(pool)
     .await?;
-    match (earliest, latest) {
-        (Some(e), Some(l)) => {
-            // 需两个不同时点（否则 delta=0 无意义）。
-            if e.ts == l.ts {
+    match (baseline, latest) {
+        (Some(base), Some(l)) => {
+            if base.ts == l.ts {
                 return Ok(None);
             }
-            let d = (l.value - e.value).to_string().parse::<f64>().unwrap_or(0.0);
-            Ok(Some(d))
+            let delta = (l.value - base.value)
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0);
+            // 覆盖率：从 max(base, since) 到 latest，相对完整窗口 (now - since)。
+            let period_secs = (now - since).num_seconds().max(1) as f64;
+            let cover_start = if base.ts > since { base.ts } else { since };
+            let covered = (l.ts - cover_start).num_seconds().max(0) as f64;
+            let coverage = (covered / period_secs).clamp(0.0, 1.0);
+            Ok(Some(ValueDelta {
+                delta,
+                coverage,
+                base_ts: base.ts,
+                latest_ts: l.ts,
+            }))
         }
         _ => Ok(None),
     }
@@ -251,6 +308,99 @@ pub async fn seed_trader_performance(
     .bind(address)
     .bind(sanitize(pnl)?)
     .bind(sanitize(vol)?)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 用官方**分类**排行榜的 pnl/vol 种子/刷新非 `OVERALL` 绩效行。
+///
+/// 排行榜前端按 `period`×`category` INNER JOIN（`require_perf`）过滤；若只有 OVERALL
+/// 行，点分类会得到 0 人。`raw_markets.category` 覆盖不足时，perf worker 无法切片，
+/// 故用官方分类榜先填展示层，直到本地切片就绪。
+///
+/// - `category` 不得为 `OVERALL`（OVERALL 仍走 `seed_trader_performance` /
+///   `upsert_official_pnl`）。
+/// - 写入 `realized_pnl` / `total_volume` / 近似 `roi=pnl/vol`（便于默认按 ROI 排序），
+///   同步写 `official_*`。
+/// - 若行已被 perf worker 实算（`position_count`/`wins`/`losses` 任一非 0），**只**更新
+///   `official_*`，不覆盖自算指标。
+pub async fn upsert_category_leaderboard_seed(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+    period: &str,
+    category: &str,
+    realized_pnl: Option<f64>,
+    total_volume: Option<f64>,
+    source: &str,
+) -> Result<(), DbError> {
+    if category.is_empty() || category.eq_ignore_ascii_case("OVERALL") {
+        return Ok(());
+    }
+    let Some(pnl) = realized_pnl else {
+        return Ok(());
+    };
+    let sanitize = |v: f64| -> Result<Decimal, DbError> {
+        let s = if v.is_nan() || v.is_infinite() {
+            0.0
+        } else {
+            v
+        };
+        Decimal::try_from(s).map_err(|e| DbError::Invalid(e.to_string()))
+    };
+    let pnl_dec = sanitize(pnl)?;
+    let vol_dec: Option<Decimal> = match total_volume {
+        Some(v) => Some(sanitize(v)?),
+        None => None,
+    };
+    // 近似 ROI：官方榜无成本基数，用 pnl/vol 作可排序代理；vol 缺失或 ≤0 则 0。
+    let roi_dec = match vol_dec {
+        Some(v) if v > Decimal::ZERO => pnl_dec / v,
+        _ => Decimal::ZERO,
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO trader_hub.trader_performance
+            (platform, address, period, category, realized_pnl, total_volume, roi,
+             official_pnl, official_vol, official_source, official_pnl_at)
+        VALUES ($1, $2, $3, $4, $5, COALESCE($6, 0), $7, $5, $6, $8, now())
+        ON CONFLICT (platform, address, period, category) DO UPDATE SET
+            official_pnl = excluded.official_pnl,
+            official_vol = COALESCE(excluded.official_vol, trader_hub.trader_performance.official_vol),
+            official_source = excluded.official_source,
+            official_pnl_at = now(),
+            realized_pnl = CASE
+                WHEN trader_hub.trader_performance.position_count = 0
+                 AND trader_hub.trader_performance.wins = 0
+                 AND trader_hub.trader_performance.losses = 0
+                THEN excluded.realized_pnl
+                ELSE trader_hub.trader_performance.realized_pnl
+            END,
+            total_volume = CASE
+                WHEN trader_hub.trader_performance.position_count = 0
+                 AND trader_hub.trader_performance.wins = 0
+                 AND trader_hub.trader_performance.losses = 0
+                THEN COALESCE(excluded.total_volume, trader_hub.trader_performance.total_volume)
+                ELSE trader_hub.trader_performance.total_volume
+            END,
+            roi = CASE
+                WHEN trader_hub.trader_performance.position_count = 0
+                 AND trader_hub.trader_performance.wins = 0
+                 AND trader_hub.trader_performance.losses = 0
+                THEN excluded.roi
+                ELSE trader_hub.trader_performance.roi
+            END
+        "#,
+    )
+    .bind(platform)
+    .bind(address)
+    .bind(period)
+    .bind(category)
+    .bind(pnl_dec)
+    .bind(vol_dec)
+    .bind(roi_dec)
+    .bind(source)
     .execute(pool)
     .await?;
     Ok(())

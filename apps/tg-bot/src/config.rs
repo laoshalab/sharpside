@@ -20,13 +20,19 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
+        // 安全修复 3.5：生产环境 TG_BOT_SECRET 走 assert_secret（空/默认/短密钥 panic）。
+        let tg_bot_secret = sharpside_shared::secrets::assert_secret(
+            "TG_BOT_SECRET",
+            &env::var("TG_BOT_SECRET").unwrap_or_else(|_| "dev-tg-bot-secret".into()),
+        )
+        .to_string();
         Self {
             tg_token: env::var("TG_BOT_TOKEN").unwrap_or_default(),
             account_url: env::var("ACCOUNT_URL").unwrap_or_else(|_| "http://127.0.0.1:8084".into()),
             follow_url: env::var("FOLLOW_URL").unwrap_or_else(|_| "http://127.0.0.1:8082".into()),
             venue_hub_url: env::var("VENUE_HUB_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8081".into()),
-            tg_bot_secret: env::var("TG_BOT_SECRET").unwrap_or_else(|_| "dev-tg-bot-secret".into()),
+            tg_bot_secret,
             default_amount: env::var("TG_DEFAULT_AMOUNT")
                 .ok()
                 .and_then(|s| s.parse().ok())

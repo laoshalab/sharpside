@@ -107,7 +107,7 @@ sharpside/
 | CLOB 鉴权 | **L2 HMAC-SHA256**（`POLY_*` headers，hmac + sha2 crate） |
 | Builder 归因 | `X-Builder-Code` header + builderCode 入订单 |
 | 免 gas | **Polymarket Builder Relayer**（WALLET-CREATE / WALLET batch，reqwest 直调 REST，无需用户签名） |
-| KMS | 抽象 trait（dev=明文 env / prod=AWS KMS / 未来 HSM） |
+| KMS | 抽象 trait（dev=`DevKms` 明文 env / **prod=`LocalKms` 站内落盘 master key** / 可选远期云 KMS·HSM，非上线门禁） |
 | CLOB | **polymarket/rs-clob-client** 或 **polymarket_client_sdk_v2**（支持 `SignatureType::Poly1271`） |
 | 部署 | 单二进制 + systemd（与 polycopier 同款） |
 

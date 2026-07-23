@@ -1,18 +1,17 @@
 //! KMS 抽象：加密 / 解密 owner EOA 私钥与 L2 secret。
 //!
-//! 对应 `docs/CHANNEL_A_SIGNING.md` §3.2 / §7「AWS KMS 接入（dev 路径用 env 明文）」。
+//! 对应 `docs/CHANNEL_A_SIGNING.md`：生产路径为站内 **`LocalKms`**（不依赖亚马逊等云 KMS）。
 //!
-//! 三条路径：
-//! - **`LocalKms`**（生产 · 自托管）：落盘 master key + AES-256-GCM 对称加密。master key 文件由
-//!   env `SHARPSIDE_KMS_MASTER_KEY_PATH` 指定，不存在则自动生成（0600）。私钥落盘加密，不依赖云。
+//! 路径：
+//! - **`LocalKms`**（**生产默认** · 站内签）：落盘 master key + AES-256-GCM。master key 由
+//!   env `SHARPSIDE_KMS_MASTER_KEY_PATH` 指定，不存在则自动生成（0600）。签名在站内完成，不调云。
 //! - **`DevKms`**：dev/测试用。明文透传（base64 包装），无任何加密——**仅 dev**，
 //!   生产绝不可用。由 env `SHARPSIDE_KMS_DEV_PLAINTEXT=1` 显式开启，否则拒绝（防误用）。
-//! - **`AwsKms`**（feature `aws`，stub）：云上生产路径。调 AWS KMS `Encrypt`/`Decrypt`，
-//!   per-user KMS key。需 AWS 凭证与网络（待接 `aws-sdk-kms`）。
+//! - **`AwsKms`**（stub，**远期可选**，非上线门禁）：若未来要接云 KMS 再实现；当前一律 `NotEnabled`。
 //! - **`FnKms`**：闭包注入，单测用。
 //!
 //! account 服务用 `encrypt` 写入 `user_venue_credentials.encrypted_blob`；
-//! copier 服务用 `decrypt` 还原 owner EOA 私钥 / L2 secret 后签名。
+//! copier 服务用 `decrypt` 还原 owner EOA 私钥 / L2 secret 后**站内签名**。
 
 #![forbid(unsafe_code)]
 
@@ -24,7 +23,7 @@ pub enum KmsError {
     #[error("KMS 操作失败: {0}")]
     Ops(String),
     #[error(
-        "KMS 未启用：dev 路径需设 SHARPSIDE_KMS_DEV_PLAINTEXT=1；生产路径需 feature aws + AWS 凭证"
+        "KMS 未启用：dev 设 SHARPSIDE_KMS_DEV_PLAINTEXT=1；生产设 SHARPSIDE_KMS_MASTER_KEY_PATH（LocalKms）"
     )]
     NotEnabled,
     #[error("KMS 密文损坏或非本 KMS 产出: {0}")]
@@ -116,15 +115,15 @@ where
 // AES-256-GCM 对称加密。master key 文件由 env `SHARPSIDE_KMS_MASTER_KEY_PATH` 指定；
 // 不存在则自动生成（0600 权限）。密文格式 `local:` + base64(nonce[12] || ct+tag)。
 //
-// 适用：单机 / 自托管部署（私钥落盘加密）。多实例须共享同一 master key 文件（或挂载 secret）。
-// 云上可换 AwsKms（见下方 stub，待接 aws-sdk-kms）。
+// 适用：单机 / 自托管部署（私钥落盘加密，站内解密后签名）。多实例须共享同一 master key
+//（或挂载同一 secret）。不依赖亚马逊等云 KMS；`AwsKms` stub 仅为远期可选，非上线门禁。
 //
 // 安全说明：master key 是整个系统的根密钥——泄露即所有密文可解。生产应：
 //   1. master key 文件权限 0600，仅服务进程可读；
 //   2. 备份 master key（丢失即所有用户私钥不可恢复）；
 //   3. 不同环境（prod/staging）用不同 master key。
 
-/// 落盘 master key 的 AES-256-GCM KMS。生产路径（自托管）。
+/// 落盘 master key 的 AES-256-GCM KMS。**生产默认**（站内签，自托管）。
 pub struct LocalKms {
     master_key: zeroize::Zeroizing<[u8; 32]>,
 }
@@ -245,25 +244,16 @@ impl Kms for LocalKms {
     }
 }
 
-// ── AwsKms（云路径 stub，待接 aws-sdk-kms）──
+// ── AwsKms（远期可选 stub · 非上线门禁）──
 //
-// 真实 AWS KMS 实现需 `aws-sdk-kms` + AWS 凭证 + 网络（见 `docs/CHANNEL_A_SIGNING.md` §7）。
-// 本机受限网络无法拉取 aws-sdk-kms，故此处仅提供 stub：所有操作返回 [`KmsError::NotEnabled`]。
-// 自托管生产路径用 [`LocalKms`]（落盘 master key + AES-256-GCM）；云上替换此 stub 为
-// `aws-sdk-kms::Client` 调用即可（接口与 LocalKms 一致）。
-//
-// 生产接入步骤：
-// 1. 在 Cargo.toml 加 `aws-config` / `aws-sdk-kms`（feature-gated）；
-// 2. 用 `AwsKms::from_env().await` 构造（load_from_env → Client）；
-// 3. `encrypt` 调 `client.encrypt().key_id(...).plaintext(...).send()`，base64 编码 CiphertextBlob；
-// 4. `decrypt` 调 `client.decrypt().ciphertext_blob(...).send()`，UTF-8 还原明文；
-// 5. per-user KMS key_id 存 user 表 `kms_key_id` 列（未来迁移 0013）。
+// 当前生产固定走 [`LocalKms`]（站内签）。本 stub 全部返回 [`KmsError::NotEnabled`]，
+// 仅保留 trait 插槽；若未来要接云 KMS，再加 `aws-sdk-kms` 等依赖实现即可。
 
-/// AWS KMS stub。云上生产路径替换为真实现（见模块注释）；自托管用 [`LocalKms`]。
+/// AWS KMS 占位。**不要**用于生产；生产用 [`LocalKms`]。
 pub struct AwsKms;
 
 impl AwsKms {
-    /// 占位构造。真实实现须 `async` load AWS config。
+    /// 占位构造。远期若接云 KMS 再改为 async load config；当前勿调用。
     pub fn from_env_stub() -> Self {
         Self
     }

@@ -10,8 +10,9 @@
 //! - 数据健康：`GET /shadow-health/summary|heatmap|top-diffs|audits`
 //! - `GET /healthz` / `GET /readyz`
 
+use crate::auth::{oidc_callback, oidc_login, oidc_logout, oidc_me, AdminAuth};
 use crate::error::ApiError;
-use crate::state::{AdminAuth, AppState};
+use crate::state::AppState;
 use axum::extract::{Path, Query};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
@@ -25,6 +26,11 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
+        // 安全修复 3.3：admin SSO/OIDC（登录/回调/登出/当前身份），不挂 AdminAuth。
+        .route("/auth/oidc/login", get(oidc_login))
+        .route("/auth/oidc/callback", get(oidc_callback))
+        .route("/auth/oidc/logout", post(oidc_logout))
+        .route("/auth/me", get(oidc_me))
         // 映射审核
         .route("/mappings/pending", get(list_pending_mappings))
         .route("/mappings/verify", post(verify_mapping))
@@ -89,14 +95,18 @@ pub struct VerifyMappingBody {
     pub resolution_notes: Option<String>,
     #[serde(default)]
     pub min_notional: Option<f64>,
+    /// 安全修复 3.3：已弃用，操作者由 session 决定；保留字段兼容旧客户端。
+    #[serde(default)]
     pub verified_by: String,
 }
 
 async fn verify_mapping(
     state: AppState,
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Json(body): Json<VerifyMappingBody>,
 ) -> Result<Json<sharpside_db::MarketMapping>, ApiError> {
+    // 安全修复 3.3：操作者由 session 决定（auth.email），忽略客户端 body.verified_by。
+    tracing::info!(op = "verify_mapping", operator = %auth.email, "admin 审核操作");
     let m = map_q::verify_mapping(
         &state.db,
         &body.from_platform,
@@ -106,7 +116,7 @@ async fn verify_mapping(
         body.direction_flip,
         body.resolution_notes.as_deref(),
         body.min_notional,
-        &body.verified_by,
+        &auth.email,
     )
     .await?;
     Ok(Json(m))
@@ -141,9 +151,25 @@ async fn retire_mapping(
 async fn list_pending_identities(
     state: AppState,
     _auth: AdminAuth,
-) -> Result<Json<Vec<sharpside_db::Identity>>, ApiError> {
+) -> Result<Json<Vec<PendingIdentityOut>>, ApiError> {
     let rows = id_q::list_pending_identities(&state.db).await?;
-    Ok(Json(rows))
+    let mut out = Vec::with_capacity(rows.len());
+    for idn in rows {
+        let traders = id_q::list_identity_traders(&state.db, idn.id).await?;
+        out.push(PendingIdentityOut {
+            identity: idn,
+            traders,
+        });
+    }
+    Ok(Json(out))
+}
+
+/// 待审身份 + 已链接 traders（运营审核证据）。
+#[derive(Debug, Serialize)]
+pub struct PendingIdentityOut {
+    #[serde(flatten)]
+    pub identity: sharpside_db::Identity,
+    pub traders: Vec<sharpside_db::Trader>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,11 +179,12 @@ pub struct VerifyIdentityBody {
 
 async fn verify_identity(
     state: AppState,
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Path(id): Path<Uuid>,
-    Json(body): Json<VerifyIdentityBody>,
+    Json(_body): Json<VerifyIdentityBody>,
 ) -> Result<Json<sharpside_db::Identity>, ApiError> {
-    let idn = id_q::verify_identity(&state.db, id, &body.verified_by).await?;
+    tracing::info!(op = "verify_identity", %id, operator = %auth.email, "admin 审核操作");
+    let idn = id_q::verify_identity(&state.db, id, &auth.email).await?;
     Ok(Json(idn))
 }
 
@@ -211,14 +238,15 @@ fn default_true() -> bool {
 
 async fn upsert_hot_wallet(
     state: AppState,
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Json(body): Json<UpsertHotWalletBody>,
 ) -> Result<Json<sharpside_db::HotWallet>, ApiError> {
+    tracing::info!(op = "upsert_hot_wallet", platform = %body.platform, address = %body.address, operator = %auth.email, "admin 审核操作");
     let w = mon_q::upsert_hot_wallet(
         &state.db,
         &body.platform,
         &body.address,
-        &body.added_by,
+        &auth.email,
         body.priority,
         body.scan_interval_secs,
         body.enabled,
@@ -258,16 +286,17 @@ pub struct UpsertTagRuleBody {
 
 async fn upsert_tag_rule(
     state: AppState,
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Path(rule_id): Path<String>,
     Json(body): Json<UpsertTagRuleBody>,
 ) -> Result<Json<ops::TagRule>, ApiError> {
+    tracing::info!(op = "upsert_tag_rule", %rule_id, operator = %auth.email, "admin 审核操作");
     let r = ops::upsert_tag_rule(
         &state.db,
         &rule_id,
         &body.params,
         body.enabled,
-        &body.updated_by,
+        &auth.email,
     )
     .await?;
     Ok(Json(r))

@@ -24,7 +24,7 @@ use sharpside_db::queries::identities as identity_q;
 use sharpside_db::queries::perf as perf_q;
 use sharpside_db::queries::traders as trader_q;
 use sharpside_db::DbError;
-use sharpside_shared::{allowed_execute_venues, Channel, FollowConfig, Platform};
+use sharpside_shared::{allowed_execute_venues, Channel, FollowConfig, Platform, SizingMode};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -101,6 +101,8 @@ async fn create_follow(
     // 管辖域校验：execute_venue 须被用户 jurisdiction 允许。
     // 早拒绝，避免创建出"每个信号都被 copier 跳过"的静默失效跟随。
     ensure_venue_allowed_for_user(&state, auth.user_id, &body.execute_venue).await?;
+    // 安全修复 4.4：创建时校验 sizing 边界（与 derive_copy_orders 同口径）。
+    validate_sizing(&body.config)?;
     // 档位槽位校验：Free 档最多 FREE_FOLLOW_SLOTS 个活跃跟随；Pro+ 不限。
     // 此前仅前端展示，后端不拦，可绕过 UI 无限建跟随。此处后端强制。
     let user = acct::get_user(&state.db, auth.user_id).await?;
@@ -130,6 +132,9 @@ async fn create_follow(
             follow_address,
         } => {
             validate_platform(&follow_platform)?;
+            // 安全修复 4.4：入库前归一地址（与 traders 表 / 信号匹配口径一致）。
+            let follow_address =
+                sharpside_shared::normalize_trader_id(&follow_platform, &follow_address);
             // trader 存在性校验：拒绝跟随 trader_hub.traders 中不存在的地址，
             // 否则会创建出永不命中信号、且无任何提示的静默失效跟随。
             match trader_q::get_trader(&state.db, &follow_platform, &follow_address).await {
@@ -360,13 +365,15 @@ async fn ingest_signal(
 
     // 3. 派生 + 落库
     let derived = derive_copy_orders(&event, &relations, &verified);
-    // 信号去重键：同一 (platform,trader,token,ts) 在 outbox 重发时产出同一 key，
+    // 信号去重键：同一 (platform,trader,token,ts[,source_id]) 在 outbox 重发时产出同一 key，
     // 配合 copy_order (signal_id, follow_relation_id) 唯一约束，重发不重复下单。
+    // source_id：逐笔信号为成交 ID，diff 信号为 None。
     let sig_id = sharpside_shared::signal_id(
         event.platform.as_str(),
         &event.trader_id,
         &event.token_id,
         event.ts,
+        event.source_id.as_deref(),
     );
     let mut enqueued = 0usize;
     let mut skipped = 0usize;
@@ -436,6 +443,21 @@ pub(crate) fn validate_channel(c: &str) -> Result<(), ApiError> {
 
 /// Free 档活跃跟随槽位上限。Pro+ 不限。
 const FREE_FOLLOW_SLOTS: i64 = 3;
+
+/// 安全修复 4.4：Fixed amount > 0；Proportional ratio ∈ (0, 1]。
+fn validate_sizing(cfg: &FollowConfig) -> Result<(), ApiError> {
+    match cfg.sizing {
+        SizingMode::Fixed { amount } if amount <= 0.0 => Err(ApiError::BadRequest(format!(
+            "Fixed amount 须 > 0，当前 {amount}"
+        ))),
+        SizingMode::Proportional { ratio } if !(ratio > 0.0 && ratio <= 1.0) => {
+            Err(ApiError::BadRequest(format!(
+                "Proportional ratio 须 ∈ (0,1]，当前 {ratio}"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
 
 /// 管辖域校验：用户 `jurisdiction` 须允许 `execute_venue`。
 ///

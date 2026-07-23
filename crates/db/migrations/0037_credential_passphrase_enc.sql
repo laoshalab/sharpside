@@ -1,0 +1,16 @@
+-- 0037_credential_passphrase_enc.sql
+-- 安全修复 2.1：L2 passphrase 走 KMS 加密落库。
+--
+-- `user_venue_credentials.encrypted_blob` 是单一 jsonb 列（schemaless），无需 DDL 加列。
+-- 加密在应用层完成（account/deposit.rs::store_credential 调 state.kms.encrypt(passphrase)），
+-- 写入新字段 `encrypted_l2_passphrase`（密文），明文 `l2_passphrase` 置空。
+--
+-- 读取侧（crates/venues/polymarket/src/lib.rs::resolve_l2_passphrase）：
+--   1) 优先 KMS 解密 `encrypted_l2_passphrase`；
+--   2) 旧凭证无此字段（serde default None）→ 回退明文 `l2_passphrase` 兼容（warn）。
+--
+-- 旧凭证迁移策略：无需 SQL 回填（无法在 SQL 内调用 KMS）。旧凭证继续可用（回退路径），
+-- 下次重新预配 / 重新保存时自动升级为加密落库。生产 KMS（LocalKms/AwsKms）下 DB dump 不含明文 passphrase。
+--
+-- 本文件为策略标记，无 DDL。保留以记录迁移顺序与变更意图。
+SELECT 1;
