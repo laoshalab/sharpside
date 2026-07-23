@@ -55,17 +55,22 @@ async fn tick_once(state: &AppState) -> Result<(), anyhow::Error> {
             }
         };
         for w in &targets {
-            // 增量游标：(ts, trade_id)。None = 从未轮询过（bootstrap）。
-            // 复合游标消除同秒多笔漏检（旧 ts > MAX(ts) 会跳过同秒后续笔）。
-            let cursor = match raw::latest_trade_cursor(&state.db, platform.as_str(), &w.address).await {
+            // P1-10：显式游标（migration 0045），独立于 raw_trades，避免靠 MAX(ts) 推断 bootstrap。
+            // 旧逻辑：raw_trades 被清空/首笔写失败时 MAX(ts) 回 None → 反复 bootstrap → 信号永久丢失。
+            let cursor_row = match raw::get_trade_watch_cursor(&state.db, platform.as_str(), &w.address).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(
                         platform = platform.as_str(), address = %w.address, error = %e,
-                        "读 latest_trade_cursor 失败，跳过该地址本轮",
+                        "读 trade_watch_cursor 失败，跳过该地址本轮",
                     );
                     continue;
                 }
+            };
+            // cursor = (ts, trade_id)。None=首次（bootstrap）；Some 且 bootstrapped=true=正常增量。
+            let cursor: Option<(chrono::DateTime<chrono::Utc>, Option<String>)> = match &cursor_row {
+                Some(c) if c.bootstrapped => c.last_ts.map(|ts| (ts, c.last_trade_id.clone())),
+                _ => None,
             };
 
             // 翻页拉取：最新优先，按 offset 翻页直到无新成交或达页数上限。
@@ -96,8 +101,24 @@ async fn tick_once(state: &AppState) -> Result<(), anyhow::Error> {
                 // bootstrap：cursor 为空时只记基线（最新一条），不 emit。
                 if cursor.is_none() {
                     if let Some(latest) = trades.first() {
-                        if let Err(e) = upsert_raw_trade(state, platform, &w.address, latest).await {
-                            tracing::warn!(address = %w.address, error = %e, "bootstrap 写基线 raw_trade 失败");
+                        match upsert_raw_trade(state, platform, &w.address, latest).await {
+                            Ok(()) => {
+                                // P1-10：基线写成功才标 bootstrapped，避免写失败时反复 bootstrap。
+                                if let Err(e) = raw::set_trade_watch_bootstrap(
+                                    &state.db,
+                                    platform.as_str(),
+                                    &w.address,
+                                    latest.ts,
+                                    latest.tx_hash.as_deref(),
+                                )
+                                .await
+                                {
+                                    tracing::warn!(address = %w.address, error = %e, "bootstrap 标 cursor 失败（下轮重试）");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(address = %w.address, error = %e, "bootstrap 写基线 raw_trade 失败（下轮重试）");
+                            }
                         }
                     }
                     tracing::info!(
@@ -148,7 +169,7 @@ async fn tick_once(state: &AppState) -> Result<(), anyhow::Error> {
             let new_trades = all_new_trades;
 
             // 先写信号账，写成功的才 emit。写失败则跳过该笔（不 emit）：
-            // 游标取 raw_trades 的 MAX(ts)，写失败即游标未前进，下一轮会重拉该笔重试。
+            // P1-10：显式 cursor 在 upsert 成功后推进，写失败即 cursor 未前进，下一轮重拉重试。
             // 关键：若写失败仍 emit，hot 对账会因 covered 少计而补发 diff（不同 signal_id）→ 双发。
             let trader_id = platform.normalize_trader_id(&w.address);
             let mut signals = Vec::with_capacity(new_trades.len());
@@ -159,6 +180,21 @@ async fn tick_once(state: &AppState) -> Result<(), anyhow::Error> {
                         "写 raw_trade 失败，跳过该笔 emit（下轮游标未前进会重试）；不 emit 以防 hot 覆盖少计双发",
                     );
                     continue;
+                }
+                // P1-10：推进显式游标（复合比较，只前进不后退）。
+                if let Err(e) = raw::advance_trade_watch_cursor(
+                    &state.db,
+                    platform.as_str(),
+                    &w.address,
+                    t.ts,
+                    t.tx_hash.as_deref(),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        address = %w.address, ts = ?t.ts, error = %e,
+                        "推进 trade_watch_cursor 失败（raw_trade 已写；下轮可能重复拉取，靠 raw_trades 去重兜底）",
+                    );
                 }
                 // source_id = 成交 ID（trade.tx_hash = d.id.or(transaction_hash)），防同秒同 token 撞键。
                 signals.push(SignalPayload {

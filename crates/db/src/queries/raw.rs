@@ -301,3 +301,92 @@ pub async fn latest_trade_cursor(
     .await?;
     Ok(row.and_then(|(ts, id)| ts.map(|t| (t, id))))
 }
+
+/// trade_watch 显式游标（migration 0045）。独立于 raw_trades，避免靠 MAX(ts) 推断 bootstrap。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct TradeWatchCursor {
+    pub platform: String,
+    pub address: String,
+    pub last_ts: Option<DateTime<Utc>>,
+    pub last_trade_id: Option<String>,
+    pub bootstrapped: bool,
+}
+
+/// 读取某地址的 trade_watch 游标。None = 从未轮询（首次 bootstrap）。
+pub async fn get_trade_watch_cursor(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+) -> Result<Option<TradeWatchCursor>, DbError> {
+    let row = sqlx::query_as::<_, TradeWatchCursor>(
+        r#"
+        SELECT * FROM trader_hub.trade_watch_cursor
+        WHERE platform = $1 AND address = $2
+        "#,
+    )
+    .bind(platform)
+    .bind(address)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 标记 bootstrap 基线已记（bootstrapped=true，记 last_ts/last_trade_id）。
+/// 下轮起用此游标增量 emit，不再依赖 raw_trades 是否有数据。
+pub async fn set_trade_watch_bootstrap(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+    last_ts: DateTime<Utc>,
+    last_trade_id: Option<&str>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        r#"
+        INSERT INTO trader_hub.trade_watch_cursor (platform, address, last_ts, last_trade_id, bootstrapped, updated_at)
+        VALUES ($1, $2, $3, $4, true, now())
+        ON CONFLICT (platform, address) DO UPDATE
+        SET last_ts = EXCLUDED.last_ts,
+            last_trade_id = EXCLUDED.last_trade_id,
+            bootstrapped = true,
+            updated_at = now()
+        "#,
+    )
+    .bind(platform)
+    .bind(address)
+    .bind(last_ts)
+    .bind(last_trade_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 推进游标到新成交（每笔 upsert_raw_trade 成功后调用，保证游标与账一致）。
+pub async fn advance_trade_watch_cursor(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+    ts: DateTime<Utc>,
+    trade_id: Option<&str>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        r#"
+        INSERT INTO trader_hub.trade_watch_cursor (platform, address, last_ts, last_trade_id, bootstrapped, updated_at)
+        VALUES ($1, $2, $3, $4, true, now())
+        ON CONFLICT (platform, address) DO UPDATE
+        SET last_ts = EXCLUDED.last_ts,
+            last_trade_id = EXCLUDED.last_trade_id,
+            updated_at = now()
+        WHERE trade_watch_cursor.last_ts IS NULL
+           OR EXCLUDED.last_ts > trade_watch_cursor.last_ts
+           OR (EXCLUDED.last_ts = trade_watch_cursor.last_ts
+               AND EXCLUDED.last_trade_id > trade_watch_cursor.last_trade_id)
+        "#,
+    )
+    .bind(platform)
+    .bind(address)
+    .bind(ts)
+    .bind(trade_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

@@ -71,7 +71,7 @@ pub async fn ping(pool: &PgPool) -> Result<(), DbError> {
 /// 新增迁移时在此追加一行 `include_str!`。
 fn build_migrations() -> Vec<Migration> {
     // (version, description, sql)
-    const SOURCES: [(i64, &str, &str); 44] = [
+    const SOURCES: [(i64, &str, &str); 45] = [
         (
             1,
             "create_schemas",
@@ -272,6 +272,11 @@ fn build_migrations() -> Vec<Migration> {
             "redemptions_retry",
             include_str!("../migrations/0044_redemptions_retry.sql"),
         ),
+        (
+            45,
+            "trade_watch_cursor",
+            include_str!("../migrations/0045_trade_watch_cursor.sql"),
+        ),
     ];
 
     SOURCES
@@ -295,7 +300,7 @@ mod tests {
     #[test]
     fn build_migrations_has_ten_in_order() {
         let migrations = build_migrations();
-        assert_eq!(migrations.len(), 44, "迁移数量应为 44");
+        assert_eq!(migrations.len(), 45, "迁移数量应为 45");
         for w in migrations.windows(2) {
             assert!(
                 w[0].version < w[1].version,
