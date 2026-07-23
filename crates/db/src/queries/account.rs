@@ -1108,14 +1108,22 @@ pub async fn sum_daily_notional(
     Ok(v)
 }
 
-/// 某用户自 `since` 起的 copy_order 数（rapid-flip 守卫用）。
+/// 某用户自 `since` 起**真实尝试下单**的 copy_order 数（rapid-flip 守卫用）。
+///
+/// 只计 pending/dispatched/submitted/filled（真实进入下单流程的），
+/// 排除 skipped/failed/cancelled（风控主动放弃或未成交的终态）。
+/// 否则 skipped 会累加触发守卫 → 后续信号全 skip → 雪崩式"越 skip 越跟不上"。
 pub async fn count_recent_copy_orders(
     pool: &PgPool,
     user_id: Uuid,
     since: DateTime<Utc>,
 ) -> Result<i64, DbError> {
     let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT COUNT(*) FROM account.copy_order WHERE user_id = $1 AND enqueued_at >= $2",
+        r#"
+        SELECT COUNT(*) FROM account.copy_order
+        WHERE user_id = $1 AND enqueued_at >= $2
+          AND status IN ('pending', 'dispatched', 'submitted', 'filled')
+        "#,
     )
     .bind(user_id)
     .bind(since)
@@ -1612,7 +1620,75 @@ pub async fn update_redemption_status(
     Ok(row)
 }
 
-/// 列出用户赎回历史（最近优先）。
+/// 列出可重试的 failed 赎回：attempts < 3 且 next_attempt_at <= now。
+/// worker 每轮扫一批，对每条先查链上 balanceOf（0 → 已赎回，标 mined），
+/// 否则改回 pending（唯一约束防并发）→ venue.redeem → 成功 mined / 失败 mark_retry_failed。
+pub async fn list_retryable_failed_redemptions(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<Redemption>, DbError> {
+    let rows = sqlx::query_as::<_, Redemption>(
+        r#"
+        SELECT * FROM account.redemptions
+        WHERE status = 'failed' AND attempts < 3
+          AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
+        ORDER BY next_attempt_at ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 标记赎回重试失败：attempts+1，置 next_attempt_at（指数退避：30s/120s/300s）。
+/// attempts 达 3 则不再设 next_attempt_at（停止自动重试，交人工）。
+pub async fn mark_redemption_retry_failed(
+    pool: &PgPool,
+    id: Uuid,
+    note: &str,
+) -> Result<Redemption, DbError> {
+    let row = sqlx::query_as::<_, Redemption>(
+        r#"
+        UPDATE account.redemptions
+        SET status = 'failed',
+            attempts = attempts + 1,
+            next_attempt_at = CASE
+                WHEN attempts + 1 >= 3 THEN NULL
+                ELSE now() + (INTERVAL '30 second' * (1 << (attempts + 1)))
+            END,
+            note = $2
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(note)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 把 failed 赎回改回 pending（重试前），供 venue.redeem 重新发起。
+/// 唯一约束 WHERE status IN ('pending','mined') 会防并发重复。
+pub async fn revive_redemption_to_pending(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Redemption, DbError> {
+    let row = sqlx::query_as::<_, Redemption>(
+        r#"
+        UPDATE account.redemptions
+        SET status = 'pending'
+        WHERE id = $1 AND status = 'failed'
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
 pub async fn list_redemptions(
     pool: &PgPool,
     user_id: Uuid,

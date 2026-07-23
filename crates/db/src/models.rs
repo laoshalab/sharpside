@@ -478,6 +478,12 @@ pub struct Redemption {
     /// 赎回发生的 Deposit Wallet（空字符串 = 迁移前旧行 / 未区分）。
     #[serde(default)]
     pub deposit_wallet: String,
+    /// 已尝试次数（0=首次；3=已达上限，不再自动重试）。
+    #[serde(default)]
+    pub attempts: i32,
+    /// 下次可重试时刻（仅 status=failed 且 attempts<3 时由 worker 扫描）。
+    #[serde(default)]
+    pub next_attempt_at: Option<DateTime<Utc>>,
 }
 
 /// `account.billing_invoices` 行。Pro+ USDC 订阅应付单（migration 0040）。

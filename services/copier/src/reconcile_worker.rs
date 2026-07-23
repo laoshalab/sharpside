@@ -77,7 +77,32 @@ async fn reconcile_one(
     };
     let cred = load_credential(state, order.user_id, execute_venue, &order.channel).await?;
 
-    let st = venue.order_state(&cred, venue_order_id).await?;
+    let st = match venue.order_state(&cred, venue_order_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = e.to_string();
+            // P0：order_state 返回 404 / "not found" 表示 Venue 端无此订单（orderID 无效/已过期/凭证不一致）。
+            // 旧逻辑：? 传播 → tick 层 warn 留 submitted → 无限重试，订单永久卡 submitted。
+            // 改：降级为 failed（孤儿单，人工核对），避免 submitted 永久盲区。
+            // 其他错误（网络/限流/KMS 瞬态）仍留 submitted 下轮重试。
+            let is_not_found = msg.contains("404")
+                || msg.to_ascii_lowercase().contains("not found")
+                || msg.to_ascii_lowercase().contains("can't be found");
+            if is_not_found {
+                warn!(order_id = %order.id, venue_order_id, error = %msg, "order_state 404，订单在 Venue 不存在，降级 failed（孤儿单）");
+                acct::update_copy_order_status(
+                    &state.db,
+                    order.id,
+                    "failed",
+                    Some(&format!("order_state 404：Venue 无此订单（孤儿单）: {msg}")),
+                )
+                .await?;
+                return Ok(());
+            }
+            // 瞬态错误：向上传播，tick 层留 submitted 下轮重试。
+            return Err(anyhow::anyhow!(e));
+        }
+    };
 
     match st.status {
         OrderStatus::Filled => {

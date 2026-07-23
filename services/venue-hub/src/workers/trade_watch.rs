@@ -105,17 +105,23 @@ async fn tick_once(state: &AppState) -> Result<(), anyhow::Error> {
             if new_trades.is_empty() {
                 continue;
             }
+            // 先写信号账，写成功的才 emit。写失败则跳过该笔（不 emit）：
+            // 游标取 raw_trades 的 MAX(ts)，写失败即游标未前进，下一轮会重拉该笔重试。
+            // 关键：若写失败仍 emit，hot 对账会因 covered 少计而补发 diff（不同 signal_id）→ 双发。
+            let trader_id = platform.normalize_trader_id(&w.address);
             let mut signals = Vec::with_capacity(new_trades.len());
             for t in &new_trades {
-                // 写信号账（去重：链上 tx_hash / 玩钱 trade_id）。失败不阻塞——下一轮重试。
                 if let Err(e) = upsert_raw_trade(state, platform, &w.address, t).await {
-                    tracing::warn!(address = %w.address, error = %e, "写 raw_trade 失败，该笔仍 emit（覆盖检查可能少计）");
+                    tracing::warn!(
+                        address = %w.address, ts = ?t.ts, error = %e,
+                        "写 raw_trade 失败，跳过该笔 emit（下轮游标未前进会重试）；不 emit 以防 hot 覆盖少计双发",
+                    );
+                    continue;
                 }
-                let trader_id = platform.normalize_trader_id(&w.address);
                 // source_id = 成交 ID（trade.tx_hash = d.id.or(transaction_hash)），防同秒同 token 撞键。
                 signals.push(SignalPayload {
                     platform,
-                    trader_id,
+                    trader_id: trader_id.clone(),
                     token_id: t.token_id.clone(),
                     market_id: t.market_id.clone(),
                     side: t.side,
@@ -126,7 +132,9 @@ async fn tick_once(state: &AppState) -> Result<(), anyhow::Error> {
                     source_id: t.tx_hash.clone(),
                 });
             }
-            emit_signals(state, signals).await;
+            if !signals.is_empty() {
+                emit_signals(state, signals).await;
+            }
         }
     }
     Ok(())

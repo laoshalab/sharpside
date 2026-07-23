@@ -533,13 +533,21 @@ impl PolymarketClient {
         }
         let resp: serde_json::Value =
             serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-        Ok(resp
+        let order_id = resp
             .get("orderID")
             .or_else(|| resp.get("order_id"))
             .or_else(|| resp.get("id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string())
+            .and_then(|v| v.as_str());
+        match order_id {
+            Some(id) if !id.is_empty() => Ok(id.to_string()),
+            // P0：解析不到 orderID 时硬失败，而非回退 "unknown"。
+            // 否则 mark_submitted 会写入 venue_order_id="unknown"，reconcile 用它查 /data/order 永远 404，
+            // 订单永久卡 submitted（孤儿单）。此处返回 Err → exec 置 failed 人工核对。
+            _ => Err(format!(
+                "post /order {status} 成功但响应无 orderID 字段（响应片段: {}）",
+                text.chars().take(200).collect::<String>()
+            )),
+        }
     }
     /// `POST /auth/api-key`（CLOB API，L1 EIP-712 签名 → 派生 L2 凭证）。
     ///

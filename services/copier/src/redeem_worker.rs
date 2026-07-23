@@ -10,7 +10,9 @@
 //!   首跑 last_scan=None（回填全部已结算市场）。
 //! - **防重复**：DB 唯一约束 `(user, condition_id, outcome) WHERE status IN (pending,mined)`
 //!   兜底；insert_redemption 冲突返回 Conflict，worker 跳过。
-//! - **失败重试**：failed 的赎回不重试（链上 balanceOf 已 0 或签名失败）；由手动端点兜底。
+//! - **失败重试**：failed 的赎回有限重试（attempts<3，指数退避 30s/120s/300s）。
+//!   瞬态失败（relayer 5xx / RPC 超时）可恢复；重试前先查链上 balanceOf，0 则标 mined（上轮已成功）。
+//!   永久错误（KMS/签名/neg-risk）会耗尽 attempts 后保留 failed 交人工。
 //! - **纯收益操作**：赎回无金额风控（赢仓位换 pUSD，1:1，无市场风险）。
 
 use crate::state::AppState;
@@ -48,9 +50,20 @@ async fn tick(
     let since = *cursor.lock().unwrap();
     let markets = raw::list_resolved_markets(&state.db, "polymarket", since).await?;
     if markets.is_empty() {
+        // 无新结算市场，仍可能有待重试的 failed 赎回。
+    } else {
+        info!(n = markets.len(), since = ?since, "赎回 worker 扫到新结算市场");
+    }
+
+    // P0-8：重试可恢复的 failed 赎回（relayer/RPC 瞬态失败）。
+    // 在新市场扫描之前处理，避免新市场积压阻塞重试。
+    if let Err(e) = retry_failed_redemptions(state).await {
+        warn!(error = %e, "failed 赎回重试批次失败");
+    }
+
+    if markets.is_empty() {
         return Ok(());
     }
-    info!(n = markets.len(), since = ?since, "赎回 worker 扫到新结算市场");
 
     let venue_impl = match state.registry.get(sharpside_shared::Platform::Polymarket) {
         Some(v) => v.clone(),
@@ -251,8 +264,136 @@ async fn process_user_redeem(
                 error = %e,
                 "自动赎回链上失败，标记 failed"
             );
-            acct::update_redemption_status(&state.db, pending.id, "failed", None, Some(&note))
+            // P0-8：瞬态失败可重试。首次失败设 next_attempt_at（30s 后），attempts+1。
+            // 永久错误（KMS/签名/neg-risk）也会落 failed，但重试前 balanceOf 校验会兜住已赎回/无仓位。
+            acct::mark_redemption_retry_failed(&state.db, pending.id, &note).await?;
+        }
+    }
+    Ok(())
+}
+
+/// P0-8：重试可恢复的 failed 赎回。
+///
+/// 扫 `status='failed' AND attempts<3 AND next_attempt_at<=now` 的行，对每条：
+///   1. 链上 balanceOf：0 → 上轮可能已成功但回报丢失，直接标 mined（幂等收尾）。
+///   2. 否则改回 pending → venue.redeem → 成功 mined / 失败 attempts+1（指数退避）。
+///
+/// 永久错误（KMS 解密失败、neg-risk revert、签名失败）会在 venue.redeem 再次失败，
+/// attempts 累加至上限后停止自动重试，保留 failed 交人工。
+async fn retry_failed_redemptions(state: &AppState) -> Result<(), anyhow::Error> {
+    const RETRY_BATCH: i64 = 20;
+    let pending_retry = acct::list_retryable_failed_redemptions(&state.db, RETRY_BATCH).await?;
+    if pending_retry.is_empty() {
+        return Ok(());
+    }
+    info!(n = pending_retry.len(), "扫到可重试 failed 赎回");
+
+    let venue_impl = match state.registry.get(sharpside_shared::Platform::Polymarket) {
+        Some(v) => v.clone(),
+        None => {
+            warn!("polymarket venue 未注册，failed 赎回重试跳过");
+            return Ok(());
+        }
+    };
+
+    let rpc_url = std::env::var("POLYGON_RPC_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::routes::POLYGON_RPC_DEFAULT_FALLBACK.to_string());
+    let pusd = crate::routes::parse_address_const(crate::routes::PUSD_CONST)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let ctf = crate::routes::parse_address_const(crate::routes::CTF_CONST)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    for r in pending_retry {
+        if let Err(e) = retry_one_redemption(state, &venue_impl, &r, pusd, ctf, &rpc_url).await {
+            warn!(
+                redemption_id = %r.id, user_id = %r.user_id, error = %e,
+                "重试单笔赎回失败，保留 failed 待下轮"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 重试单笔 failed 赎回。
+async fn retry_one_redemption(
+    state: &AppState,
+    venue_impl: &std::sync::Arc<dyn Venue>,
+    r: &sharpside_db::models::Redemption,
+    pusd: alloy_primitives::Address,
+    ctf: alloy_primitives::Address,
+    rpc_url: &str,
+) -> Result<(), anyhow::Error> {
+    // 重新加载凭证（凭证可能已被更新/轮换）。
+    let creds = acct::list_credentials(&state.db, r.user_id).await?;
+    let cred_row = creds
+        .into_iter()
+        .find(|c| c.platform == r.venue.as_str())
+        .ok_or_else(|| anyhow::anyhow!("{} 凭证未预配", r.venue))?;
+    let blob = &cred_row.encrypted_blob;
+    let provision_live = blob
+        .get("provision_live")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !provision_live {
+        // 凭证已离线化，不再可自动赎回；保留 failed 不重试。
+        return Ok(());
+    }
+    let cred: Credential = serde_json::from_value(blob.clone())?;
+    let deposit_wallet_address = match &cred {
+        Credential::DepositWalletDelegated {
+            deposit_wallet_address,
+            ..
+        } => deposit_wallet_address.clone(),
+        _ => return Err(anyhow::anyhow!("非 DepositWalletDelegated 凭证，跳过重试")),
+    };
+
+    // 链上 balanceOf 兜底：0 说明上轮已赎回成功（回报丢失）或仓位已转出，直接标 mined。
+    let dw: alloy_primitives::Address = deposit_wallet_address
+        .parse()
+        .map_err(|e| anyhow::anyhow!("deposit_wallet_address 解析失败: {e}"))?;
+    let index_set = if r.outcome == "YES" { 2u64 } else { 1u64 };
+    let position_id = sharpside_venues_polymarket::onchain::ctf_position_id(
+        pusd,
+        &r.condition_id,
+        index_set,
+    );
+    let balance =
+        sharpside_venues_polymarket::onchain::ctf_balance_of(rpc_url, ctf, dw, position_id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+    if balance <= 0.0 {
+        info!(
+            redemption_id = %r.id, user_id = %r.user_id, condition_id = %r.condition_id,
+            "重试时链上 balanceOf=0，判定上轮已赎回，标 mined 收尾"
+        );
+        acct::update_redemption_status(&state.db, r.id, "mined", None, Some("重试时 balanceOf=0，判定已赎回"))
+            .await?;
+        return Ok(());
+    }
+
+    // 改回 pending（唯一约束防并发），重新发起 redeem。
+    let revived = acct::revive_redemption_to_pending(&state.db, r.id).await?;
+    info!(
+        redemption_id = %r.id, user_id = %r.user_id, condition_id = %r.condition_id,
+        attempts = r.attempts, balance, "重试发起赎回"
+    );
+    let result = venue_impl.redeem(&cred, &r.condition_id, balance).await;
+    match result {
+        Ok(res) => {
+            let status = if res.tx_hash.is_some() { "mined" } else { "pending" };
+            acct::update_redemption_status(&state.db, revived.id, status, res.tx_hash.as_deref(), None)
                 .await?;
+        }
+        Err(e) => {
+            let note = format!("重试失败(attempt {}): {e}", r.attempts + 1);
+            warn!(
+                redemption_id = %r.id, user_id = %r.user_id, error = %e,
+                "重试赎回链上失败，attempts+1"
+            );
+            acct::mark_redemption_retry_failed(&state.db, revived.id, &note).await?;
         }
     }
     Ok(())
