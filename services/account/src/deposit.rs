@@ -229,6 +229,7 @@ pub async fn provision(
 /// 8 步顺序对齐前端 stepper：
 /// ①owner EOA ②KMS 加密 ③CREATE2 派生 ④Relayer 部署 ⑤L1 deriveApiKey
 /// ⑥batch approve ⑦余额同步 ⑧入库。
+#[allow(clippy::too_many_arguments)]
 async fn store_credential(
     state: &AppState,
     user_id: uuid::Uuid,

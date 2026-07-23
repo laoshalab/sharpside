@@ -13,8 +13,8 @@ pub struct Config {
     #[allow(dead_code)]
     pub venue_hub_url: String,
     /// 内部信号端点共享密钥（`/internal/signals` 鉴权）。
-    /// 非空时，请求须携带 `X-Internal-Secret: <secret>`，否则 401。
-    /// 空串则不校验（仅限内网/开发；生产应设置）。
+    /// **强制配置**：空串时 `/internal/signals` 直接 401 拒绝接收信号（防 follow 端口误暴露公网被灌单）。
+    /// 须与 venue-hub 的 `FOLLOW_SIGNAL_SECRET` 一致。dev/e2e 用 `e2e-internal-secret`。
     pub internal_signal_secret: String,
 }
 
@@ -29,10 +29,18 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10),
-            jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into()),
+            jwt_secret: sharpside_shared::secrets::assert_secret(
+                "JWT_SECRET",
+                &env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into()),
+            )
+            .to_string(),
             venue_hub_url: env::var("VENUE_HUB_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8081".into()),
-            internal_signal_secret: env::var("INTERNAL_SIGNAL_SECRET").unwrap_or_default(),
+            internal_signal_secret: sharpside_shared::secrets::assert_secret(
+                "INTERNAL_SIGNAL_SECRET",
+                &env::var("INTERNAL_SIGNAL_SECRET").unwrap_or_default(),
+            )
+            .to_string(),
         }
     }
 }

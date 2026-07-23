@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
 
+// 密码校验链（verify_password + PBKDF2 兼容路径）在 account bin 内暂未被调用：
+// account 当前仅注册（hash_password），登录校验由 gateway / copier 各自持有副本。
+// 保留此链供 account 后续接入 login 端点，并维持与 copier 的存量 PBKDF2 哈希兼容。
+#[allow(dead_code)]
 type HmacSha256 = Hmac<Sha256>;
 
 /// JWT claims。`sub` = user_id。
@@ -116,6 +120,7 @@ pub fn hash_password(password: &str) -> Result<String, ApiError> {
 }
 
 /// 校验密码。`$argon2` 前缀走 argon2；否则走旧 PBKDF2 兼容路径。
+#[allow(dead_code)]
 pub fn verify_password(password: &str, stored: &str) -> bool {
     if stored.starts_with("$argon2") {
         let Ok(parsed) = PasswordHash::new(stored) else {
@@ -132,6 +137,7 @@ pub fn verify_password(password: &str, stored: &str) -> bool {
 // ── 旧 PBKDF2-HMAC-SHA256（仅用于校验存量哈希）──
 
 /// PBKDF2 单块派生（dkLen=32 → 一个 32 字节块，i=1）。
+#[allow(dead_code)]
 fn pbkdf2_block(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
     let mut u: Vec<u8> = Vec::with_capacity(salt.len() + 4);
     u.extend_from_slice(salt);
@@ -156,6 +162,7 @@ fn pbkdf2_block(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
 }
 
 /// 旧格式校验（`iterations$salt_hex$hash_hex`），常时比较。
+#[allow(dead_code)]
 fn verify_password_pbkdf2(password: &str, stored: &str) -> bool {
     let Some((iter_s, rest)) = stored.split_once('$') else {
         return false;
@@ -176,6 +183,7 @@ fn verify_password_pbkdf2(password: &str, stored: &str) -> bool {
     constant_time_eq(&dk, &expected)
 }
 
+#[allow(dead_code)]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -196,6 +204,7 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+#[allow(dead_code)]
 fn unhex(s: &str) -> Result<Vec<u8>, ()> {
     if !s.len().is_multiple_of(2) {
         return Err(());

@@ -51,12 +51,36 @@ pub fn assert_secret<'a>(name: &str, value: &'a str) -> &'a str {
     value
 }
 
+/// 常时字节比较。用于共享 secret 校验（admin token / TG secret / daemon key /
+/// internal signal secret），避免按字节短路比较带来的时序侧信道。
+///
+/// 长度不等仍走完整遍历后返回 false（不提前返回），与 `subtle::ConstantTimeEq` 行为一致。
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = 0u8;
+    let n = a.len().min(b.len());
+    for i in 0..n {
+        diff |= a[i] ^ b[i];
+    }
+    // 长度差异也并入 diff，但保持常时：用 0x01 掩码吸收长度差
+    diff |= (a.len() == b.len()) as u8 ^ 1;
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    // 这些测试通过修改进程级 env var 验证 is_production/assert_secret 行为，
+    // 并行运行会互相覆盖 APP_ENV/SHARPSIDE_ENV 导致竞态失败，故用该锁串行化。
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn dev_allows_defaults() {
+        let _g = env_lock().lock().unwrap();
         // 默认（无 APP_ENV）即非生产，默认值放行
         std::env::remove_var("APP_ENV");
         std::env::remove_var("SHARPSIDE_ENV");
@@ -70,6 +94,7 @@ mod tests {
 
     #[test]
     fn production_rejects_empty_and_defaults() {
+        let _g = env_lock().lock().unwrap();
         std::env::set_var("APP_ENV", "production");
         assert!(is_production());
         let res = std::panic::catch_unwind(|| assert_secret("JWT_SECRET", "dev-secret-change-me"));
@@ -86,6 +111,7 @@ mod tests {
 
     #[test]
     fn production_detection_case_insensitive() {
+        let _g = env_lock().lock().unwrap();
         std::env::set_var("APP_ENV", "Production");
         assert!(is_production());
         std::env::remove_var("APP_ENV");

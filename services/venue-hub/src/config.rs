@@ -37,7 +37,8 @@ pub struct Config {
     /// 默认 `http://127.0.0.1:8082`。设为空串则禁用信号 emit（仅快照）。
     pub follow_url: String,
     /// 调用 follow `/internal/signals` 时携带的 `X-Internal-Secret`。
-    /// 须与 follow 服务的 `INTERNAL_SIGNAL_SECRET` 一致；空串则不发送（follow 侧也未配置时放行）。
+    /// **必须配置**：follow 侧已强制要求（空串即 401 拒收信号），故本侧空串会导致所有信号被拒。
+    /// 须与 follow 服务的 `INTERNAL_SIGNAL_SECRET` 一致。
     pub follow_signal_secret: String,
 }
 
@@ -69,6 +70,8 @@ pub struct WorkerIntervals {
     pub backfill_batch: u32,
     /// backfill refresh 窗口（天）：超过此时间未回填的交易者增量重拉新成交。
     pub backfill_refresh_days: u32,
+    /// signal_replay worker 间隔（秒）：扫 signal_outbox 重发未投递信号（H4 修复）。
+    pub signal_replay_secs: u64,
 }
 
 fn parse_bool(name: &str, default: bool) -> bool {
@@ -123,6 +126,7 @@ impl Config {
                 backfill_secs: parse_u64("WORKER_BACKFILL_SECS", 120),
                 backfill_batch: parse_u64("WORKER_BACKFILL_BATCH", 25) as u32,
                 backfill_refresh_days: parse_u64("WORKER_BACKFILL_REFRESH_DAYS", 7) as u32,
+                signal_replay_secs: parse_u64("WORKER_SIGNAL_REPLAY_SECS", 15),
             },
             auto_match_threshold: parse_f64("AUTO_MATCH_THRESHOLD", 0.7),
             identity_threshold: parse_f64("IDENTITY_THRESHOLD", 0.6),
@@ -140,7 +144,11 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             follow_url: env::var("FOLLOW_URL").unwrap_or_else(|_| "http://127.0.0.1:8082".into()),
-            follow_signal_secret: env::var("FOLLOW_SIGNAL_SECRET").unwrap_or_default(),
+            follow_signal_secret: sharpside_shared::secrets::assert_secret(
+                "FOLLOW_SIGNAL_SECRET",
+                &env::var("FOLLOW_SIGNAL_SECRET").unwrap_or_default(),
+            )
+            .to_string(),
         }
     }
 }

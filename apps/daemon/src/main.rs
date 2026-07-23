@@ -59,6 +59,9 @@ struct ResultBody {
     tx_hash: Option<String>,
     venue_order_id: Option<String>,
     skip_reason: Option<String>,
+    /// 回写映射后的执行市场/token（同 Venue 时等于 source；跨 Venue 由 daemon 本地映射）。
+    execute_market_id: Option<String>,
+    execute_token_id: Option<String>,
 }
 
 #[tokio::main]
@@ -234,6 +237,10 @@ async fn poll_once(
             .execute_market_id
             .clone()
             .unwrap_or_else(|| o.source_market_id.clone());
+        let token = o
+            .execute_token_id
+            .clone()
+            .unwrap_or_else(|| o.source_token_id.clone());
 
         // 本地风控
         if config.local_max_notional > 0.0 && notional > config.local_max_notional {
@@ -250,6 +257,8 @@ async fn poll_once(
                     tx_hash: None,
                     venue_order_id: None,
                     skip_reason: Some(reason.clone()),
+                    execute_market_id: Some(market.clone()),
+                    execute_token_id: Some(token.clone()),
                 },
             )
             .await?;
@@ -270,6 +279,8 @@ async fn poll_once(
                     tx_hash: Some(format!("dry-run-{}", o.id)),
                     venue_order_id: Some(format!("dry-{}", o.id)),
                     skip_reason: None,
+                    execute_market_id: Some(market.clone()),
+                    execute_token_id: Some(token.clone()),
                 },
             )
             .await?;
@@ -291,6 +302,8 @@ async fn poll_once(
                             tx_hash: Some(fill.tx_hash.clone()),
                             venue_order_id: Some(fill.venue_order_id.clone()),
                             skip_reason: None,
+                            execute_market_id: Some(market.clone()),
+                            execute_token_id: Some(token.clone()),
                         },
                     )
                     .await?;
@@ -315,6 +328,8 @@ async fn poll_once(
                             tx_hash: None,
                             venue_order_id: None,
                             skip_reason: Some(reason.clone()),
+                            execute_market_id: Some(market.clone()),
+                            execute_token_id: Some(token.clone()),
                         },
                     )
                     .await?;

@@ -60,6 +60,7 @@ DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info ACCOUNT_LISTEN_ADDR=127.0.0.
   SHARPSIDE_KMS_DEV_PLAINTEXT=1 \
   "$ROOT/target/debug/sharpside-account" >/tmp/realsign_account.log 2>&1 & PIDS+=($!)
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info FOLLOW_LISTEN_ADDR=127.0.0.1:8082 \
+  INTERNAL_SIGNAL_SECRET=e2e-internal-secret \
   "$ROOT/target/debug/sharpside-follow" >/tmp/realsign_follow.log 2>&1 & PIDS+=($!)
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info COPIER_LISTEN_ADDR=127.0.0.1:8083 \
   COPIER_DRY_RUN=false WORKER_EXEC_SECS=2 \
@@ -119,6 +120,7 @@ for m in ms:
 
 echo "=== 8. 注入信号 → 派生 pending copy_order ==="
 SIG=$(curl -fs -X POST "$FOLLOW/internal/signals" -H 'Content-Type: application/json' \
+  -H 'X-Internal-Secret: e2e-internal-secret' \
   -d "{\"platform\":\"polymarket\",\"trader_id\":\"$TG_ADDR\",\"token_id\":\"$TOKEN_ID\",\"market_id\":\"$COND_ID\",\"side\":\"buy\",\"price\":0.5,\"size\":100,\"ts\":\"2026-07-22T09:45:00Z\"}")
 echo "$SIG" | grep -qE '"enqueued":[1-9]' && ok "信号派生 enqueued≥1" || { bad "信号派生失败 ($SIG)"; exit 1; }
 

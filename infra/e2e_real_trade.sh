@@ -60,6 +60,7 @@ DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info ACCOUNT_LISTEN_ADDR=127.0.0.
   SHARPSIDE_KMS_DEV_PLAINTEXT=1 \
   "$ROOT/target/debug/sharpside-account" >/tmp/realtrade_account.log 2>&1 & PIDS+=($!)
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info FOLLOW_LISTEN_ADDR=127.0.0.1:8082 \
+  INTERNAL_SIGNAL_SECRET=e2e-internal-secret \
   "$ROOT/target/debug/sharpside-follow" >/tmp/realtrade_follow.log 2>&1 & PIDS+=($!)
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info COPIER_LISTEN_ADDR=127.0.0.1:8083 \
   COPIER_DRY_RUN=false WORKER_EXEC_SECS=2 \
@@ -79,6 +80,7 @@ SHARPSIDE_KMS_DEV_PLAINTEXT=1 \
 POLYMARKET_CLOB_POST=1 \
 POLYMARKET_HTTP_PROXY="$PROXY" \
 FOLLOW_URL="$FOLLOW" \
+INTERNAL_SIGNAL_SECRET=e2e-internal-secret \
   cargo test --offline -p sharpside-copier real_copy_trade_e2e -- --ignored --nocapture 2>&1 | \
   tee /tmp/realtrade_test.log | rg "step|REAL_COPY_TRADE|panicked|assertion|error\[" 
 

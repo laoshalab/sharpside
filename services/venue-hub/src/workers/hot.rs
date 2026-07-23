@@ -123,6 +123,17 @@ async fn diff_positions(
             return Vec::new();
         }
     };
+    // Bootstrap：首次监控该 address 时 prev 为空。若直接 diff，会把 trader 现有全部持仓
+    // 当作 Buy 信号发出（用户刚跟随即收到存量仓位跟单指令）。本轮只写 baseline 快照、不 emit；
+    // 下一轮起 prev 非空，真实增量才派生信号。
+    if prev.is_empty() {
+        tracing::info!(
+            platform = platform.as_str(),
+            address,
+            "bootstrap：首次监控，仅写 baseline 快照，本轮不 emit 信号"
+        );
+        return Vec::new();
+    }
     let now = chrono::Utc::now();
     let prev_map: HashMap<String, &sharpside_db::models::PositionSnapshot> =
         prev.iter().map(|s| (s.token_id.clone(), s)).collect();
@@ -189,7 +200,8 @@ async fn diff_positions(
     signals
 }
 
-/// 批量 POST 信号到 follow `/internal/signals`。失败只记日志，不阻塞快照写入。
+/// 批量 POST 信号到 follow `/internal/signals`。失败则落 `signal_outbox` 由 replay worker 重发，
+/// 不再静默丢弃（H4 修复）。快照写入仍正常推进——outbox 兜底重发，不阻塞 diff。
 async fn emit_signals(state: &AppState, signals: Vec<SignalPayload>) {
     if signals.is_empty() {
         return;
@@ -201,14 +213,22 @@ async fn emit_signals(state: &AppState, signals: Vec<SignalPayload>) {
     let url = format!("{}/internal/signals", follow_url.trim_end_matches('/'));
     let n = signals.len();
     let secret = state.config.follow_signal_secret.trim();
+    let mut failed = 0usize;
     for sig in signals {
         let trader = sig.trader_id.clone();
         let token = sig.token_id.clone();
+        // 与 follow 侧 copy_order.signal_id 用同一算法，保证 outbox 重发幂等。
+        let sig_id = sharpside_shared::signal_id(
+            sig.platform.as_str(),
+            &sig.trader_id,
+            &sig.token_id,
+            sig.ts,
+        );
         let mut req = state.http.post(&url).json(&sig);
         if !secret.is_empty() {
             req = req.header("x-internal-secret", secret);
         }
-        match req.send().await {
+        let ok = match req.send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if !status.is_success() {
@@ -218,14 +238,34 @@ async fn emit_signals(state: &AppState, signals: Vec<SignalPayload>) {
                         trader = %trader,
                         token = %token,
                         body = body.chars().take(200).collect::<String>(),
-                        "follow /internal/signals 非 2xx",
+                        "follow /internal/signals 非 2xx，落 outbox 待重发",
                     );
+                    false
+                } else {
+                    true
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, trader = %trader, token = %token, "POST follow /internal/signals 失败")
+                tracing::warn!(error = %e, trader = %trader, token = %token, "POST follow /internal/signals 失败，落 outbox 待重发");
+                false
+            }
+        };
+        if !ok {
+            failed += 1;
+            let payload = match serde_json::to_value(&sig) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(error = %e, "SignalPayload 序列化失败，无法落 outbox，该信号丢失");
+                    continue;
+                }
+            };
+            if let Err(e) =
+                sharpside_db::queries::outbox::enqueue_signal_outbox(&state.db, &sig_id, &payload, &url, 5)
+                    .await
+            {
+                tracing::error!(error = %e, signal_id = %sig_id, "signal_outbox 落表失败，该信号丢失");
             }
         }
     }
-    tracing::info!(n, "hot worker emit 信号完成");
+    tracing::info!(n, failed, "hot worker emit 信号完成（失败已落 outbox）");
 }

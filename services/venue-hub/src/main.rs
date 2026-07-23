@@ -27,6 +27,15 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
     tracing::info!(listen = %config.listen_addr, "venue-hub 启动");
 
+    // 配置一致性告警：follow_url 非空但 follow_signal_secret 为空时，follow 侧会 401 拒收所有信号，
+    // 导致 hot worker 检出的仓位变化被静默丢弃。生产由 assert_secret 兜底 panic；此处覆盖 dev 误配。
+    if !config.follow_url.trim().is_empty() && config.follow_signal_secret.trim().is_empty() {
+        tracing::warn!(
+            follow_url = %config.follow_url,
+            "FOLLOW_SIGNAL_SECRET 为空但 FOLLOW_URL 已配置：所有信号将被 follow 拒收。请设 FOLLOW_SIGNAL_SECRET 并与 follow 的 INTERNAL_SIGNAL_SECRET 一致"
+        );
+    }
+
     // DB 连接 + 迁移
     let db = sharpside_db::connect(&config.database_url, config.db_max_connections).await?;
     sharpside_db::migrate(&db).await?;

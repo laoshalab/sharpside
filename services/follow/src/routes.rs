@@ -4,7 +4,7 @@
 //! - `GET /me/follows`
 //! - `PATCH /follows/{id}`
 //! - `DELETE /follows/{id}`
-//! - `POST /internal/signals`（venue-hub 检出仓位变化后调用，无鉴权，仅内网）
+//! - `POST /internal/signals`（venue-hub 检出仓位变化后调用，强制 `X-Internal-Secret` 鉴权）
 //! - Watchlist 端点见 [`crate::watchlist`]（`/watchlists*` / `/me/watchlists*`）
 //! - `GET /healthz` / `GET /readyz`
 
@@ -80,6 +80,24 @@ async fn create_follow(
 ) -> Result<Json<FollowOut>, ApiError> {
     validate_platform(&body.execute_venue)?;
     validate_channel(&body.channel)?;
+    // 已接入执行 adapter 校验：execute_venue 须已在 copier build_registry 接入（H3 修复）。
+    // 否则建出的跟随每个信号都会被 copier 因无 adapter 静默跳过。与管辖域校验互补：
+    // 管辖域管「法域允许」，本校验管「工程已接入」。
+    let exec_venue = body
+        .execute_venue
+        .parse::<Platform>()
+        .map_err(|_| ApiError::BadRequest(format!("未知 platform: {}", body.execute_venue)))?;
+    if !sharpside_shared::is_implemented_venue(exec_venue) {
+        return Err(ApiError::BadRequest(format!(
+            "execute_venue {} 暂未接入执行 adapter（当前可用：{}）",
+            body.execute_venue,
+            sharpside_shared::jurisdiction::implemented_execute_venues()
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
     // 管辖域校验：execute_venue 须被用户 jurisdiction 允许。
     // 早拒绝，避免创建出"每个信号都被 copier 跳过"的静默失效跟随。
     ensure_venue_allowed_for_user(&state, auth.user_id, &body.execute_venue).await?;
@@ -134,13 +152,14 @@ async fn create_follow(
             }
             // 唯一性预检：每个用户对同一 trader 仅允许一条 active follow，
             // 避免每信号派生多笔 copy_order 重复下单。DB 侧部分唯一索引为并发兜底。
-            if let Some(_) = acct::find_active_follow_trader(
+            if acct::find_active_follow_trader(
                 &state.db,
                 auth.user_id,
                 &follow_platform,
                 &follow_address,
             )
             .await?
+            .is_some()
             {
                 return Err(ApiError::Conflict(format!(
                     "已跟随该交易者（{follow_platform}/{follow_address}）"
@@ -167,9 +186,9 @@ async fn create_follow(
                 ));
             }
             // 唯一性预检：每个用户对同一 identity 仅允许一条 active follow。
-            if let Some(_) =
-                acct::find_active_follow_identity(&state.db, auth.user_id, follow_identity_id)
-                    .await?
+            if acct::find_active_follow_identity(&state.db, auth.user_id, follow_identity_id)
+                .await?
+                .is_some()
             {
                 return Err(ApiError::Conflict(
                     "已跟随该身份（identity）".into(),
@@ -291,17 +310,22 @@ async fn ingest_signal(
     headers: HeaderMap,
     Json(event): Json<SignalEvent>,
 ) -> Result<Json<IngestResult>, ApiError> {
-    // 0. 内部端点鉴权：若配置了 INTERNAL_SIGNAL_SECRET，请求须携带匹配的 X-Internal-Secret。
-    //    防止 follow 端口被误暴露公网时伪造仓位变化灌入 copy_order。
+    // 0. 内部端点鉴权：INTERNAL_SIGNAL_SECRET 必须配置，且请求须携带匹配的 X-Internal-Secret。
+    //    强制配置（空串即拒绝）——防止 follow 端口被误暴露公网时伪造仓位变化灌入 copy_order。
+    //    生产部署必须设 INTERNAL_SIGNAL_SECRET；dev/e2e 设一个已知值（如 e2e-internal-secret）。
     let secret = state.config.internal_signal_secret.trim();
-    if !secret.is_empty() {
-        let got = headers
-            .get("x-internal-secret")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if got != secret {
-            return Err(ApiError::Unauthorized("internal signal secret 不匹配".into()));
-        }
+    if secret.is_empty() {
+        tracing::error!("INTERNAL_SIGNAL_SECRET 未配置，拒绝接收信号（生产必须配置非空密钥）");
+        return Err(ApiError::Unauthorized(
+            "INTERNAL_SIGNAL_SECRET 未配置，拒绝接收信号".into(),
+        ));
+    }
+    let got = headers
+        .get("x-internal-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if got != secret {
+        return Err(ApiError::Unauthorized("internal signal secret 不匹配".into()));
     }
 
     // 1. 收集匹配的活跃跟随关系（trader 跟随 + identity 跟随）
@@ -336,6 +360,14 @@ async fn ingest_signal(
 
     // 3. 派生 + 落库
     let derived = derive_copy_orders(&event, &relations, &verified);
+    // 信号去重键：同一 (platform,trader,token,ts) 在 outbox 重发时产出同一 key，
+    // 配合 copy_order (signal_id, follow_relation_id) 唯一约束，重发不重复下单。
+    let sig_id = sharpside_shared::signal_id(
+        event.platform.as_str(),
+        &event.trader_id,
+        &event.token_id,
+        event.ts,
+    );
     let mut enqueued = 0usize;
     let mut skipped = 0usize;
     for d in derived {
@@ -349,7 +381,7 @@ async fn ingest_signal(
                 ("pending", None)
             }
         };
-        acct::enqueue_copy_order(
+        match acct::enqueue_copy_order(
             &state.db,
             Uuid::new_v4(),
             d.follow_relation_id,
@@ -365,8 +397,21 @@ async fn ingest_signal(
             d.signal_at,
             skip_reason.as_deref(),
             status,
+            Some(&sig_id),
         )
-        .await?;
+        .await
+        {
+            Ok(_) => {}
+            // 同一 signal_id 已派生过（outbox 重发命中唯一约束）：幂等跳过，不计错误。
+            Err(sharpside_db::DbError::Conflict(_)) => {
+                tracing::debug!(
+                    signal_id = %sig_id,
+                    follow = %d.follow_relation_id,
+                    "信号已派生过，幂等跳过"
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 
     tracing::info!(matched, enqueued, skipped, "信号派生完成");

@@ -14,8 +14,6 @@ pub enum SizingMode {
     Fixed { amount: f64 },
     /// 按被跟随者仓位比例复制
     Proportional { ratio: f64 },
-    /// 按用户总余额百分比
-    PercentOfBalance { pct: f64 },
 }
 
 /// 跟随配置，跟随关系创建时由用户指定。
@@ -50,7 +48,6 @@ mod tests {
         for s in [
             SizingMode::Fixed { amount: 50.0 },
             SizingMode::Proportional { ratio: 0.5 },
-            SizingMode::PercentOfBalance { pct: 0.05 },
         ] {
             let json = serde_json::to_string(&s).unwrap();
             let back: SizingMode = serde_json::from_str(&json).unwrap();

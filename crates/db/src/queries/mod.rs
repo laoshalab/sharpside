@@ -7,6 +7,7 @@ pub mod identities;
 pub mod mappings;
 pub mod monitor;
 pub mod ops;
+pub mod outbox;
 pub mod perf;
 pub mod raw;
 pub mod shadow;

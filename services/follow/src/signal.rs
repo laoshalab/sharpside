@@ -7,7 +7,7 @@
 //! - 跟随 trader：`(follow_platform, follow_address)` 命中信号源
 //! - 跟随 identity：`follow_identity_id` 命中信号的 `identity_id`，且须 `manual_verified=true`，否则派生为 skipped + 告警
 //! - `same_venue_only=true` 且 source_venue != execute_venue → skipped
-//! - sizing：Fixed = amount/price；Proportional = signal.size*ratio；PercentOfBalance 需余额（Phase 1b）→ skipped
+//! - sizing：Fixed = amount/price；Proportional = signal.size*ratio
 //! - `max_notional_per_order > 0` 且 size*price 超限 → skipped
 
 use chrono::{DateTime, Utc};
@@ -92,9 +92,6 @@ pub fn derive_copy_orders(
                 }
                 SizingMode::Proportional { ratio } => {
                     size = event.size * ratio;
-                }
-                SizingMode::PercentOfBalance { .. } => {
-                    skip = Some("PercentOfBalance 需余额查询（Phase 1b）".into());
                 }
             }
         }

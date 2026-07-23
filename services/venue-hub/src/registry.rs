@@ -78,6 +78,7 @@ mod tests {
                 backfill_secs: 1,
                 backfill_batch: 1,
                 backfill_refresh_days: 1,
+                signal_replay_secs: 1,
             },
             auto_match_threshold: 0.7,
             identity_threshold: 0.6,
@@ -88,6 +89,7 @@ mod tests {
             polymarket_gamma_api: None,
             polymarket_clob_api: None,
             follow_url: String::new(),
+            follow_signal_secret: String::new(),
         };
         let registry = build_registry(&config);
         assert!(registry

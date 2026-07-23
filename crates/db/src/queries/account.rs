@@ -231,7 +231,7 @@ pub async fn list_follows_of_trader(
     let rows = sqlx::query_as::<_, FollowRelation>(
         r#"
         SELECT * FROM account.follow_relation
-        WHERE follow_platform = $1 AND follow_address = $2 AND active = true
+        WHERE follow_platform = $1 AND follow_address = $2 AND active = true AND deleted_at IS NULL
         "#,
     )
     .bind(follow_platform)
@@ -247,7 +247,7 @@ pub async fn list_follows_of_identity(
     follow_identity_id: Uuid,
 ) -> Result<Vec<FollowRelation>, DbError> {
     let rows = sqlx::query_as::<_, FollowRelation>(
-        "SELECT * FROM account.follow_relation WHERE follow_identity_id = $1 AND active = true",
+        "SELECT * FROM account.follow_relation WHERE follow_identity_id = $1 AND active = true AND deleted_at IS NULL",
     )
     .bind(follow_identity_id)
     .fetch_all(pool)
@@ -305,6 +305,10 @@ pub async fn delete_follow(pool: &PgPool, id: Uuid) -> Result<(), DbError> {
 // ── copy_order ──
 
 /// 入队一条跟单指令（status=pending）。`id` 由调用方生成（便于 HTTP 返回）。
+///
+/// `signal_id` 为信号去重键（migration 0031）：同一 (signal_id, follow_relation_id) 命中
+/// 唯一约束时返回 `DbError::Conflict`，调用方据此跳过（outbox 重发同信号不重复下单）。
+/// 历史行 / 非 signal 派生传 None，不参与唯一约束。
 #[allow(clippy::too_many_arguments)]
 pub async fn enqueue_copy_order(
     pool: &PgPool,
@@ -322,6 +326,7 @@ pub async fn enqueue_copy_order(
     signal_at: DateTime<Utc>,
     skip_reason: Option<&str>,
     status: &str,
+    signal_id: Option<&str>,
 ) -> Result<CopyOrderRow, DbError> {
     let price =
         rust_decimal::Decimal::try_from(price).map_err(|e| DbError::Invalid(e.to_string()))?;
@@ -332,8 +337,8 @@ pub async fn enqueue_copy_order(
         INSERT INTO account.copy_order
             (id, follow_relation_id, user_id, source_venue, execute_venue,
              source_market_id, source_token_id, side, price, size, channel,
-             signal_at, status, skip_reason)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             signal_at, status, skip_reason, signal_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         RETURNING *
         "#,
     )
@@ -351,8 +356,15 @@ pub async fn enqueue_copy_order(
     .bind(signal_at)
     .bind(status)
     .bind(skip_reason)
+    .bind(signal_id)
     .fetch_one(pool)
-    .await?;
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::Database(ref de) if de.is_unique_violation() => {
+            DbError::Conflict("copy_order signal_id 重复（已派生，跳过）".to_string())
+        }
+        other => other.into(),
+    })?;
     Ok(row)
 }
 
@@ -427,6 +439,108 @@ pub async fn update_copy_order_status(
     .await?
     .ok_or_else(|| DbError::not_found(format!("copy_order {id}")))?;
     Ok(row)
+}
+
+/// 原子抢占一条 pending 指令：`pending → dispatched`，仅当当前仍为 pending 才成功。
+///
+/// 多 copier worker 并发时，SELECT pending 后各自跑风控，最后用此 CAS 抢占：
+/// `UPDATE ... WHERE id=$1 AND status='pending' RETURNING *`。只有一个 worker 能拿到行，
+/// 其余拿到 None 即放弃（风控工作白做但绝不重复下单）。避免长事务跨网络 await 持锁。
+/// 同时回写 `execute_market_id` / `execute_token_id`（跨 Venue 映射后的真实执行目标，供
+/// copy_execution 记录与赎回对账使用；入队时这两列为 NULL）。
+pub async fn claim_copy_order(
+    pool: &PgPool,
+    id: Uuid,
+    exec_market_id: Option<&str>,
+    exec_token_id: Option<&str>,
+) -> Result<Option<CopyOrderRow>, DbError> {
+    let row = sqlx::query_as::<_, CopyOrderRow>(
+        r#"
+        UPDATE account.copy_order SET
+            status           = 'dispatched',
+            dispatched_at    = now(),
+            execute_market_id = COALESCE($2, execute_market_id),
+            execute_token_id = COALESCE($3, execute_token_id)
+        WHERE id = $1 AND status = 'pending'
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(exec_market_id)
+    .bind(exec_token_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 列出 dispatched_at 早于 cutoff 的 dispatched 指令（reclaim worker 用）。
+/// 这些指令疑似 copier 进程崩溃后卡死，需回收。
+pub async fn list_stale_dispatched(
+    pool: &PgPool,
+    cutoff: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<CopyOrderRow>, DbError> {
+    let rows = sqlx::query_as::<_, CopyOrderRow>(
+        r#"
+        SELECT * FROM account.copy_order
+        WHERE status = 'dispatched' AND dispatched_at IS NOT NULL AND dispatched_at < $1
+        ORDER BY dispatched_at ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(cutoff)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 原子回收一条 dispatched 指令为 failed：仅当当前仍为 dispatched 才成功。
+/// 不重试 place_order（无客户端幂等键，重试可能真钱重复下单）；
+/// 仅置 failed + 原因，交人工核对 Venue 端是否已挂单后决定 filled/failed。
+pub async fn reclaim_dispatched(
+    pool: &PgPool,
+    id: Uuid,
+    reason: &str,
+) -> Result<Option<CopyOrderRow>, DbError> {
+    let row = sqlx::query_as::<_, CopyOrderRow>(
+        r#"
+        UPDATE account.copy_order SET
+            status      = 'failed',
+            skip_reason = $2
+        WHERE id = $1 AND status = 'dispatched'
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(reason)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 通道 B 回写执行目标（daemon 上报前补齐 execute_market_id/execute_token_id）。
+/// 仅当列仍为 NULL 时写入，避免覆盖已 claim 的值。
+pub async fn set_copy_order_exec_targets(
+    pool: &PgPool,
+    id: Uuid,
+    exec_market_id: Option<&str>,
+    exec_token_id: Option<&str>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        r#"
+        UPDATE account.copy_order SET
+            execute_market_id = COALESCE($2, execute_market_id),
+            execute_token_id = COALESCE($3, execute_token_id)
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(exec_market_id)
+    .bind(exec_token_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 // ── copy_execution ──
@@ -858,6 +972,10 @@ pub async fn get_copy_order(pool: &PgPool, id: Uuid) -> Result<CopyOrderRow, DbE
 }
 
 /// 取某通道下所有用户的待派发指令（copier 通道 A worker 用）。
+///
+/// `FOR UPDATE SKIP LOCKED`：多 copier worker 并发轮询时，已被其他 worker 锁定的行跳过，
+/// 减少重复抓取与风控白做。最终仍由 [`claim_copy_order`] 的 CAS `pending→dispatched`
+/// 兜底防重复下单；本锁仅为减少并发竞争的优化，非正确性依赖。
 pub async fn list_pending_copy_orders(
     pool: &PgPool,
     channel: &str,
@@ -869,6 +987,7 @@ pub async fn list_pending_copy_orders(
         WHERE channel = $1 AND status = 'pending'
         ORDER BY enqueued_at ASC
         LIMIT $2
+        FOR UPDATE SKIP LOCKED
         "#,
     )
     .bind(channel)

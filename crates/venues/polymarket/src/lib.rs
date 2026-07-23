@@ -176,6 +176,24 @@ impl Venue for PolymarketVenue {
         }
     }
 
+    /// Polymarket 市场可交易性：CLOB `/markets/{condition_id}` 的 `active && accepting_orders`。
+    /// 已结算/下架的市场 active=false 或 accepting_orders=false → 下单前早拒，避免撞服务端 400。
+    /// 拉取失败 fail-open（Ok(true)）——与 market_min_size 一致，由 place_order 兜底拒单，
+    /// 避免瞬态 /markets 故障阻断全部跟单。
+    async fn market_tradable(&self, market_id: &str) -> Result<bool, VenueError> {
+        match self.client.clob_market(market_id).await {
+            Ok(m) => Ok(m.active && m.accepting_orders),
+            Err(e) => {
+                tracing::warn!(
+                    market_id = market_id,
+                    error = %e,
+                    "/markets 拉取可交易性失败，fail-open（放行，由 place_order 兜底）"
+                );
+                Ok(true)
+            }
+        }
+    }
+
     async fn place_order(&self, cred: &Credential, order: Order) -> Result<Fill, VenueError> {
         match cred {
             Credential::DepositWalletDelegated {

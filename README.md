@@ -205,6 +205,7 @@ cargo run -p sharpside-account    # :8084
 | `SHADOW_MODE.md` | 交叉校验影子模式 |
 | `MULTI_PLATFORM.md` | 各 Venue 可行性与接入约束 |
 | `THIRD_PARTY_DATA.md` | 第三方增强数据入库与授权 |
+| `DAEMON_ROADMAP.md` | 自托管 daemon（通道 B）开发方案与里程碑 |
 
 ## 许可证
 

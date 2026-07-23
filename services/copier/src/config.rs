@@ -30,6 +30,13 @@ pub struct Config {
     pub worker_redeem_secs: u64,
     /// 自动赎回是否启用（false = 仅手动端点，worker 不跑）。默认 true（纯收益操作，建议开）。
     pub redeem_worker_enabled: bool,
+    /// dispatched 超时回收 worker 轮询间隔（秒）。扫卡在 dispatched 的指令。
+    pub worker_reclaim_secs: u64,
+    /// dispatched 超时阈值（秒）：dispatched_at 早于 now()-此值的指令被回收为 failed。
+    /// 取足够长以覆盖 place_order 正常耗时（含网络/签名/上链确认），避免误伤在途单。
+    pub dispatched_timeout_secs: u64,
+    /// dispatched 回收 worker 是否启用。默认 true（安全网，仅置 failed 不重下）。
+    pub reclaim_worker_enabled: bool,
     /// JWT 签名密钥（与 account/gateway 共用，校验用户态端点的 Bearer token）。
     pub jwt_secret: String,
 }
@@ -91,7 +98,20 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(300),
             redeem_worker_enabled: parse_bool("REDEEM_WORKER_ENABLED", true),
-            jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| "sharpside-dev-secret".into()),
+            worker_reclaim_secs: env::var("WORKER_RECLAIM_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(60),
+            dispatched_timeout_secs: env::var("DISPATCHED_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(600),
+            reclaim_worker_enabled: parse_bool("RECLAIM_WORKER_ENABLED", true),
+            jwt_secret: sharpside_shared::secrets::assert_secret(
+                "JWT_SECRET",
+                &env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into()),
+            )
+            .to_string(),
         }
     }
 }

@@ -37,6 +37,21 @@ pub fn is_allowed_venue(jurisdiction: &str, venue: Platform) -> bool {
     allowed_execute_venues(jurisdiction).contains(&venue)
 }
 
+/// 已在 copier `build_registry` 接入执行 adapter 的 Venue 集合。
+///
+/// 与管辖域允许集合不同：`allowed_execute_venues` 是「法域允许」，本函数是「工程已接入」。
+/// follow 创建时须同时满足两者——否则会建出「每个信号都被 copier 因无 adapter 跳过」的
+/// 静默失效跟随（H3 修复）。**新增 Venue 执行 adapter 时须同步更新本清单与 copier
+/// `build_registry`**（两处同源，注释互引）。
+pub fn implemented_execute_venues() -> &'static [Platform] {
+    &[Platform::Polymarket]
+}
+
+/// 判定某 execute_venue 是否已接入执行 adapter。便捷封装。
+pub fn is_implemented_venue(venue: Platform) -> bool {
+    implemented_execute_venues().contains(&venue)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +92,16 @@ mod tests {
         assert!(is_allowed_venue("us", Platform::Kalshi));
         assert!(!is_allowed_venue("eu", Platform::Kalshi));
         assert!(is_allowed_venue("other", Platform::Manifold));
+    }
+
+    #[test]
+    fn implemented_venues_currently_only_polymarket() {
+        // Phase 1：仅 Polymarket 接入执行 adapter。新增 Venue 时同步更新本断言与 copier build_registry。
+        let v = implemented_execute_venues();
+        assert!(v.contains(&Platform::Polymarket));
+        assert!(!v.contains(&Platform::Kalshi));
+        assert!(!v.contains(&Platform::Manifold));
+        assert!(is_implemented_venue(Platform::Polymarket));
+        assert!(!is_implemented_venue(Platform::Kalshi));
     }
 }

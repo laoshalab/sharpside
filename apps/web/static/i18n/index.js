@@ -45,9 +45,8 @@ export function getLocale() {
 
 export function t(key, params) {
   let s = lookup(catalogs[current], key);
-  // 缺键时：当前语 → en → 默认 zh，避免半翻页面回落成中文。
-  if (s == null && current !== 'en') s = lookup(catalogs.en, key);
-  if (s == null) s = lookup(catalogs[defaultLocale], key);
+  // 缺键时回落默认语（en）。
+  if (s == null && current !== defaultLocale) s = lookup(catalogs[defaultLocale], key);
   if (s == null) s = key;
   if (params) {
     s = s.replace(/\{(\w+)\}/g, (_, k) => (params[k] != null ? String(params[k]) : ''));

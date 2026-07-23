@@ -254,8 +254,13 @@ pub struct CopyOrderRow {
     pub channel: String,
     pub signal_at: DateTime<Utc>,
     pub enqueued_at: DateTime<Utc>,
+    /// 进入 dispatched 的时间（claim 时写入；reclaim worker 超时判据）。NULL = 未被 claim。
+    pub dispatched_at: Option<DateTime<Utc>>,
     pub status: String,
     pub skip_reason: Option<String>,
+    /// 信号去重键（migration 0031）。配合 venue-hub signal_outbox 重发幂等：
+    /// 同一 signal_id 对同一 follow_relation 仅一条 copy_order。历史行 / 非 signal 派生为 NULL。
+    pub signal_id: Option<String>,
 }
 
 /// `account.copy_execution` 行。对应 `docs/FLOWS.md` §7。

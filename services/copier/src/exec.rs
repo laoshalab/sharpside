@@ -118,6 +118,32 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
                 warn!(order_id = %order.id, error = %e, "拉取 minimum_order_size 失败，min_size 保持 0");
             }
         }
+        // 3c. 市场可交易性校验：已结算/下架的市场 active/accepting_orders=false → 早拒 skip，
+        //     避免对已关闭市场下单（撞服务端 400 或挂死单）。
+        //     venue 未实现（Unsupported）/拉取失败 → fail-closed skip + error 告警（M2 修复）：
+        //     市场状态未知时不再放行（避免对已下架市场挂死单）。代价是 Venue API 瞬态故障会
+        //     skip 该笔（置 skipped，不重试）；该 trader 下次仓位变化会重新派生新 copy_order，
+        //     故非永久丢失仓位变化。market_min_size 仍 fail-open（仅 hint，place_order 兜底）。
+        match venue.market_tradable(&exec_market_id).await {
+            Ok(false) => {
+                return skip(
+                    state,
+                    order.id,
+                    "市场不可交易（active/accepting_orders=false，已结算或下架）",
+                )
+                .await;
+            }
+            Ok(true) => {}
+            Err(e) => {
+                error!(order_id = %order.id, error = %e, "market_tradable 拉取失败，fail-closed skip");
+                return skip(
+                    state,
+                    order.id,
+                    &format!("market_tradable 拉取失败，市场状态未知，fail-closed skip: {e}"),
+                )
+                .await;
+            }
+        }
         Some(venue)
     } else {
         None
@@ -202,7 +228,8 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
             tx_hash: None,
             fee: exec_size * exec_price * exec_params.taker_fee_bps / 10_000.0,
         };
-        record_fill(state, order, &execute_venue, &fill).await?;
+        record_fill_with(state, order, &execute_venue, &exec_market_id, &exec_token_id, &fill)
+            .await?;
         info!(order_id = %order.id, "dry-run 合成成交");
         return Ok(());
     }
@@ -270,11 +297,28 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
         }
     }
 
-    // P0-2：place_order 前先置 dispatched 占位锁。copy_order.status: pending → dispatched，
-    // list_pending_copy_orders 只取 pending，故 place_order 成功后、record_fill 之前若进程崩溃，
-    // 该指令不会被下一轮 worker 重复拾取（避免真钱重复下单）。成功后置 filled，失败置 failed。
-    // 卡在 dispatched 的指令需人工核对 Polymarket 端是否已挂单后决定 filled/failed（无客户端幂等键）。
-    acct::update_copy_order_status(&state.db, order.id, "dispatched", None).await?;
+    // P0-2：place_order 前原子抢占 pending → dispatched。多 worker 并发时，风控通过后
+    // 用 `UPDATE ... WHERE id=$1 AND status='pending' RETURNING *` CAS 抢占：只有一个
+    // worker 能拿到行，其余拿到 None 即放弃（风控白做但绝不重复下单）。同时回写
+    // execute_market_id/execute_token_id（映射后的真实执行目标，供 copy_execution 与赎回对账）。
+    // 卡在 dispatched 的指令需人工核对 Polymarket 端是否已挂单后决定 filled/failed。
+    //
+    // TODO(Phase 2e/H5): 给 place_order 注入 Venue 侧幂等键（Polymarket CLOB order nonce /
+    // clientOrderId），使 reclaim worker 可安全重试 place_order 而非一律置 failed。
+    // 当前 reclaim 仅置 failed 不重下（无幂等键，重试可能真钱重复下单）；信号层重发幂等已由
+    // signal_outbox + copy_order(signal_id) 唯一约束覆盖，故订单级幂等非 outbox 安全所必需，
+    // 待接入 live CLOB POST 路径时一并补齐（需改 EIP-712 签名 nonce，风险高，本环境不可测）。
+    let claimed = acct::claim_copy_order(
+        &state.db,
+        order.id,
+        Some(&exec_market_id),
+        Some(&exec_token_id),
+    )
+    .await?;
+    if claimed.is_none() {
+        info!(order_id = %order.id, "已被其他 worker 抢占或已终态，放弃");
+        return Ok(());
+    }
 
     let order_req = Order {
         market_id: exec_market_id.clone(),
@@ -285,8 +329,12 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
     };
     match venue.place_order(&cred, order_req).await {
         Ok(fill) => {
-            record_fill(state, order, &execute_venue, &fill).await?;
+            record_fill_with(state, order, &execute_venue, &exec_market_id, &exec_token_id, &fill)
+                .await?;
             info!(order_id = %order.id, "通道 A 成交");
+            // TODO(L1): 成交后异步通知 tg-bot（HTTP POST 到 tg-bot notify 端点），
+            // 让用户在 TG 收到跟单成交提醒。需 tg-bot 侧新增 notify 端点 + copier 配置
+            // TG_BOT_NOTIFY_URL / TG_BOT_SECRET。发布后按需接入。
         }
         Err(e) => {
             fail(state, order.id, &format!("place_order 失败: {e}")).await?;
@@ -321,27 +369,22 @@ async fn fail(state: &AppState, id: uuid::Uuid, reason: &str) -> Result<(), anyh
     Ok(())
 }
 
-async fn record_fill(
+/// 显式传入执行目标的成交回写（channel A claim 后用，避免依赖 in-memory NULL）。
+async fn record_fill_with(
     state: &AppState,
     order: &CopyOrderRow,
     venue: &Platform,
+    exec_market_id: &str,
+    exec_token_id: &str,
     fill: &sharpside_venues_core::Fill,
 ) -> Result<(), anyhow::Error> {
-    let exec_market_id = order
-        .execute_market_id
-        .clone()
-        .unwrap_or_else(|| order.source_market_id.clone());
-    let exec_token_id = order
-        .execute_token_id
-        .clone()
-        .unwrap_or_else(|| order.source_token_id.clone());
     acct::insert_copy_execution(
         &state.db,
         order.id,
         order.user_id,
         venue.as_str(),
-        &exec_market_id,
-        &exec_token_id,
+        exec_market_id,
+        exec_token_id,
         Some(fill.order_id.as_str()),
         order.side.as_str(),
         fill.filled_size,
@@ -487,6 +530,8 @@ mod tests {
             skip_reason: None,
             status: "pending".into(),
             enqueued_at: chrono::Utc::now(),
+            dispatched_at: None,
+            signal_id: None,
         }
     }
 
@@ -726,6 +771,7 @@ mod tests {
             chrono::Utc::now(),
             None,
             "pending",
+            None,
         )
         .await
         .expect("插 copy_order 失败");
@@ -754,6 +800,9 @@ mod tests {
             withdraw_daily_max: 10000.0,
             worker_redeem_secs: 300,
             redeem_worker_enabled: true,
+            worker_reclaim_secs: 60,
+            dispatched_timeout_secs: 600,
+            reclaim_worker_enabled: true,
             jwt_secret: "stage2".into(),
         };
         let mut venue =
@@ -1020,8 +1069,13 @@ mod tests {
             "ts": chrono::Utc::now().to_rfc3339(),
         });
         let http = reqwest::Client::new();
+        // follow /internal/signals 现强制要求 X-Internal-Secret（与 follow 服务的
+        // INTERNAL_SIGNAL_SECRET 一致）；e2e 脚本统一用 e2e-internal-secret 启动 follow。
+        let signal_secret =
+            std::env::var("INTERNAL_SIGNAL_SECRET").unwrap_or_else(|_| "e2e-internal-secret".into());
         let sig_resp = http
             .post(format!("{follow_url}/internal/signals"))
+            .header("X-Internal-Secret", signal_secret)
             .json(&sig_body)
             .send()
             .await
@@ -1126,7 +1180,7 @@ mod tests {
     /// 复用 real_copy_trade_e2e 的 funded 凭证注入，但：
     /// - blob 显式带 `provision_live: true`（否则 build_wallet_view 走离线降级，不查余额）；
     /// - 不下单、不撤单——只读余额，零资金风险；
-    /// - 自签 JWT（HS256，secret=JWT_SECRET 默认 sharpside-dev-secret）→ HTTP GET copier /me/portfolio
+    /// - 自签 JWT（HS256，secret=JWT_SECRET 默认 dev-secret-change-me）→ HTTP GET copier /me/portfolio
     ///   → 断言 `wallet.cash_balance` 为正数（funded DW 充过 pUSD）。
     ///
     /// 前置：copier 服务单独运行（COPIER_LISTEN_ADDR + POLYMARKET_HTTP_PROXY + SHARPSIDE_KMS_DEV_PLAINTEXT=1），
@@ -1143,7 +1197,7 @@ mod tests {
         let copier_url =
             std::env::var("COPIER_URL").unwrap_or_else(|_| "http://127.0.0.1:8083".to_string());
         let jwt_secret =
-            std::env::var("JWT_SECRET").unwrap_or_else(|_| "sharpside-dev-secret".to_string());
+            std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".to_string());
         let owner_pk = std::env::var("POLYMARKET_TEST_OWNER_PK")
             .expect("需设 POLYMARKET_TEST_OWNER_PK（.env.local）");
         let owner_addr_str = std::env::var("POLYMARKET_TEST_OWNER_ADDRESS")

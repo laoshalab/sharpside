@@ -87,7 +87,26 @@ async fn list_copy_orders(
         .unwrap_or_else(|| Utc::now() - chrono::Duration::hours(24));
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let rows = acct::list_copy_orders_since(&state.db, auth.user_id, channel, since, limit).await?;
-    Ok(Json(rows))
+    // M3 修复：通道 B（daemon）服务端 jurisdiction 兜底过滤。daemon 是用户本地进程，
+    // 自身只做 local_max_notional 风控，不复查 jurisdiction。若用户创建跟随后改了 jurisdiction，
+    // 旧 follow 派生的 copy_order 可能指向已不被允许的 execute_venue——此处过滤掉，
+    // 与通道 A worker（exec.rs）的 jurisdiction 复查对齐（防御纵深）。被过滤的指令留在 pending，
+    // 由用户在 UI 调整 execute_venue 或暂停跟随。
+    let user = acct::get_user(&state.db, auth.user_id).await?;
+    let allowed: std::collections::HashSet<Platform> =
+        sharpside_shared::allowed_execute_venues(&user.jurisdiction)
+            .into_iter()
+            .collect();
+    let filtered: Vec<CopyOrderRow> = rows
+        .into_iter()
+        .filter(|r| {
+            r.execute_venue
+                .parse::<Platform>()
+                .map(|p| allowed.contains(&p))
+                .unwrap_or(false)
+        })
+        .collect();
+    Ok(Json(filtered))
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +124,11 @@ pub struct ResultBody {
     pub venue_order_id: Option<String>,
     #[serde(default)]
     pub skip_reason: Option<String>,
+    /// daemon 回写映射后的执行市场/token（跨 Venue 跟单对账用；同 Venue 可不传，回退 source）。
+    #[serde(default)]
+    pub execute_market_id: Option<String>,
+    #[serde(default)]
+    pub execute_token_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +146,24 @@ async fn report_result(
     let order = acct::get_copy_order(&state.db, id).await?;
     if order.user_id != auth.user_id {
         return Err(ApiError::Unauthorized("无权上报他人指令".into()));
+    }
+    // P0-3 幂等：仅 pending/dispatched 可上报。已 filled/failed/skipped/cancelled 的指令
+    // 拒绝重复上报，避免重复 insert_copy_execution 与状态回退（多 daemon 实例 / 轮询重试场景）。
+    if !matches!(order.status.as_str(), "pending" | "dispatched") {
+        return Err(ApiError::BadRequest(format!(
+            "指令已终态（{}），拒绝重复上报",
+            order.status
+        )));
+    }
+    // 回写 daemon 上报的执行目标（若提供且 DB 仍为 NULL）。
+    if body.execute_market_id.is_some() || body.execute_token_id.is_some() {
+        acct::set_copy_order_exec_targets(
+            &state.db,
+            id,
+            body.execute_market_id.as_deref(),
+            body.execute_token_id.as_deref(),
+        )
+        .await?;
     }
     match body.status.as_str() {
         "filled" => {

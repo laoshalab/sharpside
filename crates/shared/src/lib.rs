@@ -25,15 +25,17 @@ pub mod order;
 pub mod perf;
 pub mod platform;
 pub mod secrets;
+pub mod signal;
 pub mod tag;
 pub mod watchlist;
 
 pub use event::TradeEvent;
 pub use follow::{FollowConfig, SizingMode};
-pub use jurisdiction::{allowed_execute_venues, is_allowed_venue};
+pub use jurisdiction::{allowed_execute_venues, is_allowed_venue, is_implemented_venue};
 pub use order::{Channel, CopyOrder, CopyOrderStatus, Side};
 pub use perf::{Performance, PerformancePeriod};
 pub use platform::Platform;
+pub use signal::signal_id;
 pub use tag::{Tag, TagKind};
 pub use watchlist::{
     watchlist_limit, WatchlistCreate, WatchlistUpgrade, WATCHLIST_LIMIT_FREE,

@@ -240,6 +240,9 @@ mod tests {
             withdraw_daily_max: 10000.0,
             worker_redeem_secs: 300,
             redeem_worker_enabled: true,
+            worker_reclaim_secs: 60,
+            dispatched_timeout_secs: 600,
+            reclaim_worker_enabled: true,
             jwt_secret: "test-secret".into(),
         }
     }

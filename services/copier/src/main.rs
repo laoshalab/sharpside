@@ -12,6 +12,7 @@ mod auth;
 mod config;
 mod error;
 mod exec;
+mod reclaim_worker;
 mod redeem_worker;
 mod risk;
 mod routes;
@@ -28,6 +29,7 @@ use tracing_subscriber::EnvFilter;
 fn build_registry(kms: Option<Arc<dyn Kms>>) -> VenueRegistry {
     let mut registry = VenueRegistry::new();
     // MVP：仅 Polymarket 作为 execution venue。新增平台在此注册。
+    // ⚠ 同步更新 `sharpside_shared::jurisdiction::implemented_execute_venues()`（follow 创建门控用）。
     let mut venue = PolymarketVenue::new();
     if let Some(k) = kms {
         venue = venue.with_kms(k);
@@ -98,6 +100,18 @@ async fn main() -> anyhow::Result<()> {
         enabled = config.redeem_worker_enabled,
         interval_secs = config.worker_redeem_secs,
         "worker 已启动：redeem(自动赎回)"
+    );
+
+    // dispatched 超时回收 worker（扫卡死 dispatched → 原子置 failed，不重下）
+    let reclaim_state = state.clone();
+    workers.spawn(async move {
+        reclaim_worker::run(reclaim_state).await;
+    });
+    tracing::info!(
+        enabled = config.reclaim_worker_enabled,
+        interval_secs = config.worker_reclaim_secs,
+        timeout_secs = config.dispatched_timeout_secs,
+        "worker 已启动：reclaim(dispatched 超时回收)"
     );
 
     // HTTP API（daemon 通道 B 端点）

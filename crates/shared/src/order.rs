@@ -94,7 +94,7 @@ pub enum CopyOrderStatus {
 
 /// 标准化跟单指令。
 ///
-/// 由 Follow 服务从 `trader.position.changed` 信号派生，入 Redis `copy_queue`，
+/// 由 Follow 服务从 `trader.position.changed` 信号派生，入 Postgres `account.copy_order` 表队列，
 /// Copier 消费后查 `market_mappings` 翻译、单位换算、风控、派发执行。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopyOrder {

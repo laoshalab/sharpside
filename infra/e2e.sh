@@ -53,6 +53,7 @@ echo "=== 3. 启动服务 ==="
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info ACCOUNT_LISTEN_ADDR=127.0.0.1:8084 \
   "$ROOT/target/debug/sharpside-account" >/tmp/e2e_account.log 2>&1 & PIDS+=($!)
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info FOLLOW_LISTEN_ADDR=127.0.0.1:8082 \
+  INTERNAL_SIGNAL_SECRET=e2e-internal-secret \
   "$ROOT/target/debug/sharpside-follow" >/tmp/e2e_follow.log 2>&1 & PIDS+=($!)
 DATABASE_URL="$DB_URL" RUST_LOG=warn,sharpside=info COPIER_LISTEN_ADDR=127.0.0.1:8083 \
   COPIER_DRY_RUN=true WORKER_EXEC_SECS=2 \
@@ -81,6 +82,7 @@ curl -fs -X POST "$FOLLOW/follows" -H "Authorization: Bearer $JWT" -H 'Content-T
   -d "{\"follow_platform\":\"polymarket\",\"follow_address\":\"$TG_ADDR\",\"execute_venue\":\"polymarket\",\"channel\":\"tg\",\"config\":{\"sizing\":{\"mode\":\"fixed\",\"value\":{\"amount\":50}},\"execute_venue\":\"polymarket\",\"channel\":\"tg\",\"same_venue_only\":false}}" >/dev/null && ok "创建跟随(tg)"
 
 SIG=$(curl -fs -X POST "$FOLLOW/internal/signals" -H 'Content-Type: application/json' \
+  -H 'X-Internal-Secret: e2e-internal-secret' \
   -d "{\"platform\":\"polymarket\",\"trader_id\":\"$TG_ADDR\",\"token_id\":\"tok-yes\",\"market_id\":\"cond-123\",\"side\":\"buy\",\"price\":0.5,\"size\":100,\"ts\":\"2026-07-21T09:45:00Z\"}")
 echo "$SIG" | grep -qE '"enqueued":[1-9]' && ok "信号派生 enqueued≥1" || bad "信号派生失败 ($SIG)"
 
@@ -103,6 +105,7 @@ curl -fs -X POST "$FOLLOW/follows" -H "Authorization: Bearer $JWT" -H 'Content-T
   -d "{\"follow_platform\":\"polymarket\",\"follow_address\":\"$DAEMON_ADDR\",\"execute_venue\":\"polymarket\",\"channel\":\"daemon\",\"config\":{\"sizing\":{\"mode\":\"fixed\",\"value\":{\"amount\":50}},\"execute_venue\":\"polymarket\",\"channel\":\"daemon\",\"same_venue_only\":false}}" >/dev/null && ok "创建跟随(daemon)"
 
 SIGB=$(curl -fs -X POST "$FOLLOW/internal/signals" -H 'Content-Type: application/json' \
+  -H 'X-Internal-Secret: e2e-internal-secret' \
   -d "{\"platform\":\"polymarket\",\"trader_id\":\"$DAEMON_ADDR\",\"token_id\":\"tok-yes\",\"market_id\":\"cond-456\",\"side\":\"buy\",\"price\":0.4,\"size\":80,\"ts\":\"2026-07-21T09:46:00Z\"}")
 echo "$SIGB" | grep -qE '"enqueued":[1-9]' && ok "信号派生 enqueued≥1" || bad "信号派生失败 ($SIGB)"
 
