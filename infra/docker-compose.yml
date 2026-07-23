@@ -112,6 +112,8 @@ services:
       VENUE_HUB_ADMIN_TOKEN: "${VENUE_HUB_ADMIN_TOKEN:-dev-admin-token}"
       # 须与 follow 的 INTERNAL_SIGNAL_SECRET 一致，否则信号被 follow 拒收。
       FOLLOW_SIGNAL_SECRET: "${FOLLOW_SIGNAL_SECRET:-e2e-internal-secret}"
+      # 容器内须用 service 名访问 follow，否则回退默认 127.0.0.1:8082 打到自身 loopback。
+      FOLLOW_URL: "http://follow:8082"
     ports:
       - "8081:8081"
     depends_on:
