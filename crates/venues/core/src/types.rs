@@ -177,6 +177,24 @@ pub enum Credential {
     ApiKey { encrypted_key: String },
 }
 
+/// 订单类型（时间在先策略）。对应 Polymarket CLOB `orderType` wire 字段。
+///
+/// - `Gtc`：Good-Til-Cancelled，挂单直到成交或撤单（默认，限价）。
+/// - `Gtd`：Good-Til-Date，挂到 `Order.expiration` 指定时间后自动过期（限价）。
+/// - `Fok`：Fill-Or-Kill，立即全部成交否则整单取消（市价，all-or-nothing）。
+/// - `Fak`：Fill-And-Kill，立即成交能成交的部分，剩余取消（市价，允许部分成交）。
+///
+/// Kalshi 等其他 Venue 若语义可映射可复用；wire 字符串映射由各 adapter 负责。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderType {
+    #[default]
+    Gtc,
+    Gtd,
+    Fok,
+    Fak,
+}
+
 /// 下单请求。对应 `docs/VENUE_DESIGN.md` §3。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
@@ -186,6 +204,20 @@ pub struct Order {
     /// 目标 Venue 单位下的价格
     pub price: f64,
     pub size: f64,
+    /// 订单级幂等键：Venue 侧订单 nonce/salt（如 Polymarket CLOB salt，≤2^53）。
+    /// 由 copier 按 copy_order.id 确定性派生并持久化，place_order / 重试复用 → 相同 orderID → 幂等。
+    /// None 时 Venue 自行生成（非跟单路径 / 测试）。
+    pub idempotency_salt: Option<u64>,
+    /// 签名用 timestamp（ms），与 idempotency_salt 配套复用以发逐字节相同已签订单。None 时用 now()。
+    pub order_timestamp_ms: Option<u64>,
+    /// 订单类型（时间在先策略）。默认 Gtc（挂单直到成交或撤单）。
+    /// Fok/Fak 为市价语义（立即对盘口成交或取消）；Gtd 需配 `expiration`。
+    /// 注意：orderType/expiration 是 Polymarket CLOB wire-only 字段，不进 EIP-712 签名 struct。
+    #[serde(default)]
+    pub order_type: OrderType,
+    /// GTD 过期时间（unix 秒）。仅 `OrderType::Gtd` 时有意义；None → wire "0"（即 GTC 语义）。
+    #[serde(default)]
+    pub expiration: Option<i64>,
 }
 
 /// 成交回报。对应 `docs/VENUE_DESIGN.md` §3。

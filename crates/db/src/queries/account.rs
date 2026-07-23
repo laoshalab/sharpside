@@ -453,14 +453,22 @@ pub async fn claim_copy_order(
     id: Uuid,
     exec_market_id: Option<&str>,
     exec_token_id: Option<&str>,
+    idempotency_salt: i64,
+    order_timestamp_ms: i64,
+    exec_price: f64,
+    exec_size: f64,
 ) -> Result<Option<CopyOrderRow>, DbError> {
     let row = sqlx::query_as::<_, CopyOrderRow>(
         r#"
         UPDATE account.copy_order SET
-            status           = 'dispatched',
-            dispatched_at    = now(),
-            execute_market_id = COALESCE($2, execute_market_id),
-            execute_token_id = COALESCE($3, execute_token_id)
+            status             = 'dispatched',
+            dispatched_at      = now(),
+            execute_market_id  = COALESCE($2, execute_market_id),
+            execute_token_id   = COALESCE($3, execute_token_id),
+            idempotency_salt    = $4,
+            order_timestamp_ms = $5,
+            exec_price         = $6,
+            exec_size          = $7
         WHERE id = $1 AND status = 'pending'
         RETURNING *
         "#,
@@ -468,6 +476,10 @@ pub async fn claim_copy_order(
     .bind(id)
     .bind(exec_market_id)
     .bind(exec_token_id)
+    .bind(idempotency_salt)
+    .bind(order_timestamp_ms)
+    .bind(exec_price)
+    .bind(exec_size)
     .fetch_optional(pool)
     .await?;
     Ok(row)

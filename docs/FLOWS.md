@@ -133,6 +133,16 @@ sequenceDiagram
   CPY->>TG: 推送成交通知给用户
 ```
 
+### 6.1 dispatched 卡单回收（P1 订单级幂等）
+
+copier 在 `place_order` 前置 `status=dispatched` 占单。若进程在 dispatched 之后、`mark_submitted` 之前崩溃，指令卡死。
+reclaim worker 周期扫超时 dispatched（`dispatched_at < now() - DISPATCHED_TIMEOUT_SECS`）：
+
+- claim 时已持久化 `idempotency_salt`（按 copy_order.id 确定性派生）+ `order_timestamp_ms` + 已换算 `exec_price`/`exec_size`。
+- reclaim 用这些值重建 Order **重试 place_order 一次**：相同 salt+timestamp → alloy RFC-6979 确定性签名 → 逐字节相同已签订单 → 相同 orderID → Polymarket 判重而非重复下单（真钱安全）。
+- 重试成功 → `mark_submitted`（恢复正常对账流）；重试失败 → 置 `failed` + 人工核对（含 Venue 端判重情形，均不重复花钱）。
+- 幂等字段缺失（旧行）→ 直接 `failed` + 人工核对。
+
 ## 7. 通道 B 执行（自托管 daemon · 平台零钥 · 跨 Venue）
 
 ```mermaid

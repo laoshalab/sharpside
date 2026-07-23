@@ -77,6 +77,10 @@ mod tests {
             side: Side::Buy,
             price,
             size,
+            idempotency_salt: None,
+            order_timestamp_ms: None,
+            order_type: sharpside_venues_core::OrderType::Gtc,
+            expiration: None,
         }
     }
 

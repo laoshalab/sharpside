@@ -87,6 +87,7 @@ fn now_ms_u256() -> U256 {
 /// `signature_type`：见 [`sig_type`]。`builder`：bytes32 归因码（无则零）。
 ///
 /// `salt` 取毫秒时间戳低 53 位（CLOB 要求 wire `salt` 为 JSON integer 且 < 2^53）。
+#[allow(clippy::too_many_arguments)]
 pub fn build_v2_input(
     signer: &PrivateKeySigner,
     maker: Address,
@@ -96,6 +97,11 @@ pub fn build_v2_input(
     price: f64,
     size: f64,
     builder: B256,
+    // 订单级幂等键：调用方按 copy_order.id 确定性派生并持久化的 salt（≤2^53）。
+    // Some 时复用 → 重试发相同 orderID → Venue 端判重而非重复下单；None 时按 now() 自生（旧行为）。
+    idempotency_salt: Option<u64>,
+    // 签名用 timestamp（ms），与 idempotency_salt 配套复用。None 时用 now()。
+    order_timestamp_ms: Option<u64>,
 ) -> Result<clob_auth::V2OrderInput, String> {
     let token =
         U256::from_str_radix(token_id.trim(), 10).map_err(|e| format!("token_id 解析失败: {e}"))?;
@@ -110,9 +116,15 @@ pub fn build_v2_input(
         sharpside_shared::Side::Buy => (usdc_base, shares_base, 0u8),
         sharpside_shared::Side::Sell => (shares_base, usdc_base, 1u8),
     };
-    let ts_ms = now_ms_u256();
-    // salt < 2^53（CLOB JSON integer 安全）；毫秒低 53 位足够唯一性。
-    let salt = U256::from(ts_ms.to::<u64>() & ((1u64 << 53) - 1));
+    let ts_ms = match order_timestamp_ms {
+        Some(ts) => U256::from(ts),
+        None => now_ms_u256(),
+    };
+    // salt < 2^53（CLOB JSON integer 安全）。幂等键优先；无则取毫秒低 53 位。
+    let salt = match idempotency_salt {
+        Some(s) => U256::from(s & ((1u64 << 53) - 1)),
+        None => U256::from(ts_ms.to::<u64>() & ((1u64 << 53) - 1)),
+    };
     let signer_addr = if signature_type == sig_type::POLY_1271 {
         // POLY_1271：maker == signer == deposit wallet。clob-auth `sign_poly_1271_order_with_signer`
         // 硬约束 maker==signer（ERC-7739 TypedDataSign 的 verifyingContract = signer = DW，EIP-1271 由 DW 验）。
@@ -147,6 +159,8 @@ pub async fn sign_clob_order(
     price: f64,
     size: f64,
     neg_risk: bool,
+    idempotency_salt: Option<u64>,
+    order_timestamp_ms: Option<u64>,
 ) -> Result<SignedOrder, String> {
     let maker = signer.address();
     let input = build_v2_input(
@@ -158,6 +172,8 @@ pub async fn sign_clob_order(
         price,
         size,
         B256::ZERO,
+        idempotency_salt,
+        order_timestamp_ms,
     )?;
     let exchange = if neg_risk {
         CTF_EXCHANGE_NEG_RISK
@@ -192,6 +208,7 @@ pub async fn sign_clob_order(
 /// `builder_code`：bytes32 hex（可带 0x）。解析为 [`clob_auth::V2OrderInput::builder`] 归因码。
 /// `neg_risk`：按 market metadata（CLOB `/book` 的 `negRisk`）选择 verifyingContract
 /// （standard `0xE111...` / neg-risk `0xe222...`）。未知时传 `false`（standard）。
+#[allow(clippy::too_many_arguments)]
 pub async fn sign_clob_order_deposit(
     signer: &PrivateKeySigner,
     deposit_wallet_address: Address,
@@ -201,6 +218,8 @@ pub async fn sign_clob_order_deposit(
     size: f64,
     builder_code: Option<String>,
     neg_risk: bool,
+    idempotency_salt: Option<u64>,
+    order_timestamp_ms: Option<u64>,
 ) -> Result<SignedOrder, String> {
     let builder = builder_code
         .as_deref()
@@ -215,6 +234,8 @@ pub async fn sign_clob_order_deposit(
         price,
         size,
         builder,
+        idempotency_salt,
+        order_timestamp_ms,
     )?;
     // POLY_1271 恒走 ERC-7739 wrap（plain EIP-712 对 POLY_1271 是错的，会被 CLOB 拒签）。
     // neg_risk 决定外层 CTF Exchange domain 的 verifyingContract（standard vs neg-risk）。
@@ -306,7 +327,7 @@ mod tests {
     async fn sign_clob_order_recovers_to_signer() {
         // EOA 路径：V2 EIP-712 签名后 ecrecover 应还原出 signer 地址（编码自洽）。
         let signer = signer_from_hex(TEST_KEY).unwrap();
-        let signed = sign_clob_order(&signer, Side::Buy, "12345", 0.5, 10.0, false)
+        let signed = sign_clob_order(&signer, Side::Buy, "12345", 0.5, 10.0, false, None, None)
             .await
             .unwrap();
         assert!(signed.signature.starts_with("0x"));
@@ -345,6 +366,8 @@ mod tests {
             0.4,
             100.0,
             B256::ZERO,
+            None,
+            None,
         )
         .unwrap();
         // BUY：makerAmount=usdc(0.4*100*1e6=40_000_000), takerAmount=shares(100*1e6=100_000_000)
@@ -363,6 +386,8 @@ mod tests {
             0.4,
             100.0,
             B256::ZERO,
+            None,
+            None,
         )
         .unwrap();
         // SELL：makerAmount=shares(100_000_000), takerAmount=usdc(40_000_000)
@@ -386,6 +411,8 @@ mod tests {
             10.0,
             Some("sharpside-builder".into()),
             false,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -414,6 +441,8 @@ mod tests {
             10.0,
             Some(bc.into()),
             false,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -427,12 +456,12 @@ mod tests {
         let signer = signer_from_hex(TEST_KEY).unwrap();
         let deposit = address!("000000000000000000000000000000000000dEaD");
         let std_sig =
-            sign_clob_order_deposit(&signer, deposit, Side::Buy, "12345", 0.5, 10.0, None, false)
+            sign_clob_order_deposit(&signer, deposit, Side::Buy, "12345", 0.5, 10.0, None, false, None, None)
                 .await
                 .unwrap();
         // 同输入但 timestamp/salt 会变 → 用固定 input 直接对比 clob-auth 更稳。这里仅断言两者都合法且长度一致。
         let _neg_sig =
-            sign_clob_order_deposit(&signer, deposit, Side::Buy, "12345", 0.5, 10.0, None, true)
+            sign_clob_order_deposit(&signer, deposit, Side::Buy, "12345", 0.5, 10.0, None, true, None, None)
                 .await
                 .unwrap();
         assert_eq!(std_sig.signature.len(), 2 + 634);

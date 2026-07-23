@@ -261,6 +261,8 @@ async fn live_post_order_signs_and_reaches_balance_check() {
         size,
         Some(BUILDER_CODE.to_string()),
         neg_risk,
+        None,
+        None,
     )
     .await
     .expect("step7 sign_clob_order_deposit 失败（联调差异）");
@@ -290,6 +292,8 @@ async fn live_post_order_signs_and_reaches_balance_check() {
             &l2.secret,
             &l2.passphrase,
             owner_address,
+            sharpside_venues_core::OrderType::Gtc,
+            None,
         )
         .await;
 

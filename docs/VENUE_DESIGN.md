@@ -248,6 +248,8 @@ pub struct Order {
     pub side: Side,
     pub price: f64,      // 目标 Venue 单位
     pub size: f64,
+    pub idempotency_salt: Option<u64>,    // 订单级幂等键（Polymarket CLOB salt，按 copy_order.id 派生）
+    pub order_timestamp_ms: Option<u64>,  // 签名 timestamp，与 salt 配套复用 → 重试发相同 orderID
 }
 
 pub struct Fill {

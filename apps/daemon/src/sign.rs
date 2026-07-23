@@ -7,6 +7,7 @@
 //! - `POLYMARKET_CLOB_POST=1`：签名后 POST CLOB `/order`（需网络可达）。
 
 use sharpside_shared::Side;
+use sharpside_venues_polymarket::OrderType;
 use sharpside_venues_polymarket::clob::{self, SignedOrder};
 use sharpside_venues_polymarket::PolymarketClient;
 
@@ -68,12 +69,12 @@ pub async fn execute_polymarket(
         false
     };
     let signed: SignedOrder =
-        clob::sign_clob_order(&signer, side, token_id, price, size, neg_risk).await?;
+        clob::sign_clob_order(&signer, side, token_id, price, size, neg_risk, None, None).await?;
 
     if clob_post_enabled() {
         let client = PolymarketClient::new();
         let order_id = client
-            .post_order(&signed)
+            .post_order(&signed, OrderType::Gtc, None)
             .await
             .map_err(|e| format!("CLOB POST 失败: {e}"))?;
         Ok(LocalFill {

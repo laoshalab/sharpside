@@ -14,8 +14,8 @@ pub mod types;
 pub use sharpside_shared::{Platform, Side};
 pub use types::{
     AuthModel, Balance, Credential, Fill, Geo, LeaderboardQuery, Market, MarketQuery, Order,
-    OrderBook, OrderBookLevel, OrderState, OrderStatus, Pagination, Position, RedeemResult,
-    Trade, Trader, Unit, VenueCapabilities, VenueInfo, WithdrawResult,
+    OrderBook, OrderBookLevel, OrderState, OrderStatus, OrderType, Pagination, Position,
+    RedeemResult, Trade, Trader, Unit, VenueCapabilities, VenueInfo, WithdrawResult,
 };
 
 use async_trait::async_trait;

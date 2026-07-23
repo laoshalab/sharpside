@@ -9,10 +9,22 @@ use crate::dto::{BookDto, ClobMarketDto, LeaderboardEntry, MarketDto, PositionDt
 use governor::{DefaultDirectRateLimiter, Quota};
 use reqwest::Client;
 use serde::Deserialize;
-use sharpside_venues_core::VenueError;
+use sharpside_venues_core::{OrderType, VenueError};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// 通用 `OrderType` → Polymarket CLOB wire 字符串（`orderType` 字段值）。
+///
+/// wire-only，不进 EIP-712 签名 struct。GTC/GTD 为限价（挂单），FOK/FAK 为市价（立即对盘口）。
+pub fn order_type_wire(t: OrderType) -> &'static str {
+    match t {
+        OrderType::Gtc => "GTC",
+        OrderType::Gtd => "GTD",
+        OrderType::Fok => "FOK",
+        OrderType::Fak => "FAK",
+    }
+}
 
 /// 构造带可选代理的 reqwest 客户端。
 ///
@@ -391,12 +403,18 @@ impl PolymarketClient {
     ///
     /// 提交已签名订单到 Polymarket CLOB。返回 CLOB 订单 id。仅 `POLYMARKET_CLOB_POST=1` 时调用；
     /// 离线/无网络环境会在此处报 reqwest 错误（预期）。
+    ///
+    /// `order_type` / `expiration` 为 wire-only 字段（不进 EIP-712 签名 struct）：
+    /// - GTC/FOK/FAK → expiration 传 None（wire "0"）；GTD → 传 Some(unix_secs)。
     pub async fn post_order(
         &self,
         signed: &crate::clob::SignedOrder,
+        order_type: OrderType,
+        expiration: Option<i64>,
     ) -> Result<String, reqwest::Error> {
         let url = format!("{}/order", self.clob_api);
         let side_str = if signed.side == 0 { "BUY" } else { "SELL" };
+        let expiration_str = expiration.unwrap_or(0).to_string();
         let body = serde_json::json!({
             "order": {
                 "salt": signed.salt.to_string(),
@@ -406,7 +424,7 @@ impl PolymarketClient {
                 "tokenId": signed.token_id.to_string(),
                 "makerAmount": signed.maker_amount.to_string(),
                 "takerAmount": signed.taker_amount.to_string(),
-                "expiration": "0",
+                "expiration": expiration_str,
                 "nonce": "0",
                 "feeRateBps": "0",
                 "side": side_str,
@@ -414,7 +432,7 @@ impl PolymarketClient {
             },
             "signature": signed.signature,
             "owner": signed.signer_address.to_string(),
-            "orderType": "GTC",
+            "orderType": order_type_wire(order_type),
         });
         let resp: serde_json::Value = self.http.post(url).json(&body).send().await?.json().await?;
         Ok(resp
@@ -441,6 +459,8 @@ impl PolymarketClient {
         l2_secret: &str,
         l2_passphrase: &str,
         l2_poly_address: alloy_primitives::Address,
+        order_type: OrderType,
+        expiration: Option<i64>,
     ) -> Result<String, String> {
         let path = "/order";
         let url = format!("{}{}", self.clob_api, path);
@@ -448,10 +468,11 @@ impl PolymarketClient {
         // V2 wire body 对齐官方 clob-client-v2 `orderToJsonV2`：
         // - `signature` 在 `order` 内（非顶层）
         // - `salt` 为 JSON 整数（`parseInt`），≤2^53 安全
-        // - `expiration: "0"`（GTC 无过期）；签名 EIP-712 struct 不含 expiration/taker，但 wire body 含 expiration
+        // - `expiration`：GTC/FOK/FAK 传 "0"；GTD 传 unix 秒字符串。签名 EIP-712 struct 不含 expiration/taker，但 wire body 含 expiration
         // - 顶层 `owner` = L2 API key（非 signer 地址；官方测试断言 `owner=="api-key-uuid"`）
         // - 顶层 `deferExec`/`postOnly`；无 `taker`（OrderV2 无此字段，JSON 丢弃）
         let salt_int = u64::try_from(signed.salt).unwrap_or(0);
+        let expiration_str = expiration.unwrap_or(0).to_string();
         let body_json = serde_json::json!({
             "order": {
                 "salt": salt_int,
@@ -463,13 +484,13 @@ impl PolymarketClient {
                 "side": side_str,
                 "signatureType": signed.signature_type,
                 "timestamp": signed.timestamp_ms.to_string(),
-                "expiration": "0",
+                "expiration": expiration_str,
                 "metadata": format!("{:x}", signed.metadata),
                 "builder": format!("{:x}", signed.builder),
                 "signature": signed.signature,
             },
             "owner": l2_api_key,
-            "orderType": "GTC",
+            "orderType": order_type_wire(order_type),
             "deferExec": false,
             "postOnly": false,
         });
@@ -708,6 +729,15 @@ async fn get_json<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_type_wire_maps_all_variants() {
+        // wire 字符串须与 Polymarket CLOB `orderType` 字段值逐字一致（大写）。
+        assert_eq!(order_type_wire(OrderType::Gtc), "GTC");
+        assert_eq!(order_type_wire(OrderType::Gtd), "GTD");
+        assert_eq!(order_type_wire(OrderType::Fok), "FOK");
+        assert_eq!(order_type_wire(OrderType::Fak), "FAK");
+    }
 
     #[test]
     fn default_urls() {

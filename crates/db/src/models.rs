@@ -264,6 +264,14 @@ pub struct CopyOrderRow {
     pub venue_order_id: Option<String>,
     /// 进入 submitted 的时间（place_order 成功后写入；reconcile worker 超时撤单判据）。
     pub submitted_at: Option<DateTime<Utc>>,
+    /// 订单级幂等键：按 copy_order.id 确定性派生的 Polymarket CLOB salt（≤2^53）。
+    /// claim 时写入，place_order / reclaim 重试复用 → 相同 orderID → 幂等。NULL = 旧行未设。
+    pub idempotency_salt: Option<i64>,
+    /// 签名用 timestamp（ms），claim 时写入，重试复用 → 逐字节相同已签订单。NULL = 旧行未设。
+    pub order_timestamp_ms: Option<i64>,
+    /// 单位换算后的目标 Venue 价格 / 股数（claim 时写入），让 reclaim 重试自洽无需重跑映射。
+    pub exec_price: Option<f64>,
+    pub exec_size: Option<f64>,
     pub status: String,
     pub skip_reason: Option<String>,
     /// 信号去重键（migration 0031）。配合 venue-hub signal_outbox 重发幂等：

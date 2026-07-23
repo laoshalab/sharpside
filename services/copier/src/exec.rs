@@ -13,7 +13,7 @@ use sharpside_db::CopyOrderRow;
 use sharpside_mapping::types::ExecParams;
 use sharpside_mapping::unit::{convert_price, convert_size};
 use sharpside_shared::{allowed_execute_venues, Channel, Platform, Side};
-use sharpside_venues_core::{Credential, Order};
+use sharpside_venues_core::{Credential, Order, OrderType};
 use tracing::{error, info, warn};
 
 const TG_BATCH: i64 = 50;
@@ -301,18 +301,22 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
     // 用 `UPDATE ... WHERE id=$1 AND status='pending' RETURNING *` CAS 抢占：只有一个
     // worker 能拿到行，其余拿到 None 即放弃（风控白做但绝不重复下单）。同时回写
     // execute_market_id/execute_token_id（映射后的真实执行目标，供 copy_execution 与赎回对账）。
-    // 卡在 dispatched 的指令需人工核对 Polymarket 端是否已挂单后决定 filled/failed。
     //
-    // TODO(Phase 2e/H5): 给 place_order 注入 Venue 侧幂等键（Polymarket CLOB order nonce /
-    // clientOrderId），使 reclaim worker 可安全重试 place_order 而非一律置 failed。
-    // 当前 reclaim 仅置 failed 不重下（无幂等键，重试可能真钱重复下单）；信号层重发幂等已由
-    // signal_outbox + copy_order(signal_id) 唯一约束覆盖，故订单级幂等非 outbox 安全所必需，
-    // 待接入 live CLOB POST 路径时一并补齐（需改 EIP-712 签名 nonce，风险高，本环境不可测）。
+    // P1 订单级幂等键（Phase 2e/H5）：claim 时一次性生成并持久化 idempotency_salt（按
+    // copy_order.id 确定性派生）+ order_timestamp_ms + 已换算 exec_price/exec_size。
+    // place_order 复用 salt+timestamp → 重试发逐字节相同已签订单 → 相同 orderID → Polymarket
+    // 判重而非重复下单。reclaim worker 据此可安全重试 place_order（见 reclaim_worker.rs）。
+    let idempotency_salt = derive_idempotency_salt(order.id);
+    let order_timestamp_ms = now_ms();
     let claimed = acct::claim_copy_order(
         &state.db,
         order.id,
         Some(&exec_market_id),
         Some(&exec_token_id),
+        idempotency_salt as i64,
+        order_timestamp_ms as i64,
+        exec_price,
+        exec_size,
     )
     .await?;
     if claimed.is_none() {
@@ -326,6 +330,11 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
         side: exec_side,
         price: exec_price,
         size: exec_size,
+        idempotency_salt: Some(idempotency_salt),
+        order_timestamp_ms: Some(order_timestamp_ms),
+        // 跟单主路径：限价挂单（GTC），与历史行为一致。FOK/FAK/GTD 由调用方按需指定。
+        order_type: OrderType::Gtc,
+        expiration: None,
     };
     match venue.place_order(&cred, order_req).await {
         Ok(fill) => {
@@ -412,6 +421,25 @@ async fn record_fill_with(
 /// P0-3：纯函数解析 copy_order 的 source_venue/execute_venue/side/price/size。
 /// 任一字段非法返回 `Err(reason)`（调用方 skip + 告警），绝不静默回退默认值——
 /// side 误当 BUY = 真钱反向；price=0 = 0 价挂单；size<=0 = 空单。
+/// 订单级幂等键：按 copy_order.id 确定性派生 Polymarket CLOB salt（≤2^53，JSON 整数安全）。
+/// 取 UUID 前 8 字节 → u64 → 掩码低 53 位 → OR 1 保证非零。同一 copy_order 永远派生同一 salt，
+/// 故 place_order / reclaim 重试复用此 salt + 持久化 timestamp → 发逐字节相同已签订单 → 相同 orderID。
+fn derive_idempotency_salt(id: uuid::Uuid) -> u64 {
+    let bytes = id.as_bytes();
+    let raw = u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    (raw & ((1u64 << 53) - 1)) | 1
+}
+
+/// 当前毫秒时间戳（签名用 timestamp）。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn parse_order_fields(
     order: &CopyOrderRow,
 ) -> Result<(Platform, Platform, Side, f64, f64), String> {
@@ -545,6 +573,10 @@ mod tests {
             dispatched_at: None,
             venue_order_id: None,
             submitted_at: None,
+            idempotency_salt: None,
+            order_timestamp_ms: None,
+            exec_price: None,
+            exec_size: None,
             signal_id: None,
         }
     }

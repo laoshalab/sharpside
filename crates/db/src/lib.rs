@@ -71,7 +71,7 @@ pub async fn ping(pool: &PgPool) -> Result<(), DbError> {
 /// 新增迁移时在此追加一行 `include_str!`。
 fn build_migrations() -> Vec<Migration> {
     // (version, description, sql)
-    const SOURCES: [(i64, &str, &str); 33] = [
+    const SOURCES: [(i64, &str, &str); 34] = [
         (
             1,
             "create_schemas",
@@ -217,6 +217,11 @@ fn build_migrations() -> Vec<Migration> {
             "copy_order_submission",
             include_str!("../migrations/0033_copy_order_submission.sql"),
         ),
+        (
+            34,
+            "copy_order_idempotency",
+            include_str!("../migrations/0034_copy_order_idempotency.sql"),
+        ),
     ];
 
     SOURCES
@@ -240,7 +245,7 @@ mod tests {
     #[test]
     fn build_migrations_has_ten_in_order() {
         let migrations = build_migrations();
-        assert_eq!(migrations.len(), 33, "迁移数量应为 33");
+        assert_eq!(migrations.len(), 34, "迁移数量应为 34");
         for w in migrations.windows(2) {
             assert!(
                 w[0].version < w[1].version,

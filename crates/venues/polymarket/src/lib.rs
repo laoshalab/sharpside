@@ -2,7 +2,9 @@
 //!
 //! 实现 `Venue` trait 的 signal_source 能力（leaderboard / positions / trades / markets / book）
 //! 与 execution_venue 能力（`place_order`：Deposit Wallet POLY_1271 委托签名 + L2 HMAC + Builder 归因，
-//! 详见 `docs/CHANNEL_A_SIGNING.md`，Stage 3 已实盘验证）。`cancel_order` / `order_status` 等待补全。
+//! 详见 `docs/CHANNEL_A_SIGNING.md`，Stage 3 已实盘验证）；`cancel_order` / `order_state`（对账用）
+//! 已落地（CLOB L2 HMAC）。`order_status`（简单枚举）未 override，业务对账走 `order_state`。
+//! 订单类型当前固定 GTC（wire `orderType`/`postOnly` 写死），FOK/FAK/GTD/post-only/split/merge 待补。
 //!
 //! 设计要点：
 //! - **DTO 与 domain 分离**：`dto.rs` 是 API 原始响应，`lib.rs` 负责映射到 `venues::core` 通用类型
@@ -25,6 +27,9 @@ pub use client::{
 };
 pub use dto::{BookDto, BookLevelDto, LeaderboardEntry, MarketDto, PositionDto, TradeDto};
 pub use relayer::RelayerClient;
+/// 重新导出 [`OrderType`]，供仅依赖本 crate（不直接依赖 `sharpside-venues-core`）的下游
+/// （如 `sharpside-daemon`）调用 `post_order` / `post_order_l2` 时构造订单类型。
+pub use sharpside_venues_core::OrderType;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -235,6 +240,8 @@ impl Venue for PolymarketVenue {
                     order.size,
                     Some(builder_code.clone()),
                     neg_risk,
+                    order.idempotency_salt,
+                    order.order_timestamp_ms,
                 )
                 .await
                 .map_err(VenueError::Auth)?;
@@ -253,6 +260,8 @@ impl Venue for PolymarketVenue {
                             &l2_secret,
                             l2_passphrase,
                             signer.address(),
+                            order.order_type,
+                            order.expiration,
                         )
                         .await
                         .map_err(VenueError::Auth)?;
@@ -301,12 +310,17 @@ impl Venue for PolymarketVenue {
                     order.price,
                     order.size,
                     neg_risk,
+                    order.idempotency_salt,
+                    order.order_timestamp_ms,
                 )
                 .await
                 .map_err(VenueError::Auth)?;
 
                 if live {
-                    let order_id = self.client.post_order(&signed).await?;
+                    let order_id = self
+                        .client
+                        .post_order(&signed, order.order_type, order.expiration)
+                        .await?;
                     Ok(Fill {
                         order_id,
                         filled_size: order.size,
@@ -1323,6 +1337,10 @@ mod tests {
                     side: Side::Buy,
                     price: 0.5,
                     size: 10.0,
+                    idempotency_salt: None,
+                    order_timestamp_ms: None,
+                    order_type: sharpside_venues_core::OrderType::Gtc,
+                    expiration: None,
                 },
             )
             .await
@@ -1350,6 +1368,10 @@ mod tests {
                     side: Side::Buy,
                     price: 0.5,
                     size: 10.0,
+                    idempotency_salt: None,
+                    order_timestamp_ms: None,
+                    order_type: sharpside_venues_core::OrderType::Gtc,
+                    expiration: None,
                 },
             )
             .await
@@ -1388,6 +1410,10 @@ mod tests {
                     side: Side::Buy,
                     price: 0.5,
                     size: 10.0,
+                    idempotency_salt: None,
+                    order_timestamp_ms: None,
+                    order_type: sharpside_venues_core::OrderType::Gtc,
+                    expiration: None,
                 },
             )
             .await
@@ -1428,6 +1454,10 @@ mod tests {
                     side: Side::Buy,
                     price: 0.5,
                     size: 10.0,
+                    idempotency_salt: None,
+                    order_timestamp_ms: None,
+                    order_type: sharpside_venues_core::OrderType::Gtc,
+                    expiration: None,
                 },
             )
             .await
@@ -1472,6 +1502,10 @@ mod tests {
                     side: Side::Buy,
                     price: 0.5,
                     size: 10.0,
+                    idempotency_salt: None,
+                    order_timestamp_ms: None,
+                    order_type: sharpside_venues_core::OrderType::Gtc,
+                    expiration: None,
                 },
             )
             .await
@@ -1509,6 +1543,10 @@ mod tests {
                     side: Side::Buy,
                     price: 0.5,
                     size: 10.0,
+                    idempotency_salt: None,
+                    order_timestamp_ms: None,
+                    order_type: sharpside_venues_core::OrderType::Gtc,
+                    expiration: None,
                 },
             )
             .await
