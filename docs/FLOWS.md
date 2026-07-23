@@ -110,6 +110,7 @@ sequenceDiagram
   participant TG as TG bot
   CPY->>DB: SELECT pending copy_order(channel=tg) LIMIT batch
   CPY->>CPY: 风控引擎校验（全局×档位×user overrides + per-follow）
+  CPY->>CPY: R1-C 重跟兜底（同 venue+Proportional：copy 在途净仓 + 本笔 ≤ ratio×源净仓，否则 skip）
   alt source_venue != execute_venue
     CPY->>MAP: 查 manual_verified + resolution_verified 映射
     MAP-->>CPY: execute_market_id
@@ -142,6 +143,37 @@ reclaim worker 周期扫超时 dispatched（`dispatched_at < now() - DISPATCHED_
 - reclaim 用这些值重建 Order **重试 place_order 一次**：相同 salt+timestamp → alloy RFC-6979 确定性签名 → 逐字节相同已签订单 → 相同 orderID → Polymarket 判重而非重复下单（真钱安全）。
 - 重试成功 → `mark_submitted`（恢复正常对账流）；重试失败 → 置 `failed` + 人工核对（含 Venue 端判重情形，均不重复花钱）。
 - 幂等字段缺失（旧行）→ 直接 `failed` + 人工核对。
+
+### 6.2 重跟兜底净仓上限（R1-C）
+
+**背景**：trade_watch 宕机 >~2 个 hot 扫描周期（≈20s）且期间源 trader 有净非零仓位变化时，hot 残差信号（`signal_id` 无 `source_id`）与 trade_watch 恢复后重发的逐笔信号（`signal_id` 有 `source_id`）段数不同，`copy_order (signal_id, follow_relation_id)` 唯一索引不拦截 → 同一净仓变化派生两笔 copy_order → 真钱重复下单（R1）。
+
+**兜底**：copier 在 per-follow 风控之后、`claim_copy_order` 之前加 `check_re_follow_cap`，按"净仓物理量"而非信号键去重——本笔下单后 copy 在途+已成交净仓不得超过 `ratio × 源 trader 净仓`，否则 `skip`。
+
+**两处收紧逻辑（关键，否则误杀正常跟单）**：
+
+1. **按 ratio 缩放上限**：`cap = ratio × source_net`，**不是** `source_net`。Proportional ratio=0.5、源净仓 100 时上限为 50；若用源净仓本身作上限，重复一笔只会把 copy 推到 100（=源净仓）而不会触发，漏拦。按 ratio 缩放后第一笔把 copy 带到 50（≤上限放行），第二笔带到 100（>上限拦）。
+2. **方向门控**：仅当订单方向与源净仓方向一致（开仓/加仓向）时校验；平仓向放行。
+   - `BUY` 仅在 `source_net > +EPS` 时校验 `current + exec_size > cap + EPS`；
+   - `SELL` 仅在 `source_net < -EPS` 时校验 `current - exec_size < cap - EPS`。
+   - 不门控的后果：源 trader 平多（卖出）时快照仍显示净多 +100，cap=+50，copy 正常平仓 `current 100 → 0` 会落在 `0 < 50` 被误判为重复做空而 skip。门控后 SELL 对正源净仓不校验，正常平仓放行。
+
+**净仓口径**：`current` = 该 follow_relation 在该 source_token 上的在途（pending/dispatched/submitted 的 `copy_order.size`）+ 已成交（filled 的 `copy_execution.filled_size`）带符号和。在途计入是为了在第一笔尚未成交、`copy_execution` 未写时也能拦第二笔。
+
+**覆盖范围（不满足则 `Ok` 放行，全 fail-open 不阻断）**：
+
+| 条件 | 覆盖 |
+|------|------|
+| Proportional + 同 venue（source==execute）+ trader 跟随 + 开仓向 | ✅ 拦 |
+| Fixed sizing | ❌ 无源相对上限（绝对金额，与源净仓无关） |
+| 跨 venue | ❌ 单位不同，比较需映射 |
+| identity 跟随 | ❌ 源 trader 未存于 `copy_order`，无法查源净仓（需加 `source_trader_id` 字段，后续迁移） |
+| 平仓向重跟 | ❌ 刻意放行（源快照滞后，门控避免误杀平仓） |
+| 无源快照 / 查询失败 | ❌ fail-open（不阻断，避免新 token 永远跟不上） |
+
+**代价**：每笔下单前多 2 次查询（源快照按 (platform,address,token) 索引；copy 在途净仓按 (follow_relation_id, source_token_id) 聚合）。源快照可按 trader 短缓存（与 trade_watch 同频 3s）以摊销。
+
+**与其它去重的关系**：`signal_id` 唯一索引防"同信号重发"双跟；reclaim 同 `salt+timestamp` 防"卡单重下"双花；R1-C 防"跨源（残差×逐笔）双发"双跟——三者互补，R1-C 是唯一不依赖信号源协调的执行层兜底。
 
 ## 7. 通道 B 执行（自托管 daemon · 平台零钥 · 跨 Venue）
 

@@ -1249,6 +1249,47 @@ pub async fn count_active_copy_orders_for_follow(
     Ok(row.map(|(c,)| c).unwrap_or(0))
 }
 
+/// R1-C 重跟兜底：某 follow_relation 在某 source_token 上的"在途+已成交"带符号净仓
+/// （buy +size / sell −size）。在途 = pending/dispatched/submitted 的 copy_order.size；
+/// 已成交 = filled 的 copy_execution.filled_size。下单前用于比对源 trader 净仓 × ratio 上限。
+///
+/// copy_execution 对 copy_order_id 唯一（ON CONFLICT），LEFT JOIN 不放大行数；
+/// filled 行只取 e.filled_size，非 filled 行只取 o.size，不双计。
+pub async fn follow_inflight_net_for_token(
+    pool: &PgPool,
+    follow_relation_id: Uuid,
+    source_token_id: &str,
+) -> Result<f64, DbError> {
+    let row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
+        r#"
+        SELECT
+          COALESCE(SUM(
+            CASE WHEN o.status IN ('pending','dispatched','submitted')
+                 THEN CASE WHEN o.side = 'buy' THEN o.size ELSE -o.size END
+                 ELSE 0 END
+          ), 0)
+        + COALESCE(SUM(
+            CASE WHEN o.status = 'filled'
+                 THEN CASE WHEN e.side = 'buy' THEN e.filled_size ELSE -e.filled_size END
+                 ELSE 0 END
+          ), 0) AS net
+        FROM account.copy_order o
+        LEFT JOIN account.copy_execution e ON e.copy_order_id = o.id
+        WHERE o.follow_relation_id = $1 AND o.source_token_id = $2
+        "#,
+    )
+    .bind(follow_relation_id)
+    .bind(source_token_id)
+    .fetch_optional(pool)
+    .await?;
+    let v = row
+        .and_then(|(d,)| d)
+        .unwrap_or_default()
+        .try_into()
+        .unwrap_or(0.0f64);
+    Ok(v)
+}
+
 /// 取一条 copy_order（含归属校验用）。
 pub async fn get_copy_order(pool: &PgPool, id: Uuid) -> Result<CopyOrderRow, DbError> {
     let row = sqlx::query_as::<_, CopyOrderRow>("SELECT * FROM account.copy_order WHERE id = $1")

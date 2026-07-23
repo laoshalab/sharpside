@@ -9,6 +9,7 @@ use chrono::{Duration, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use sharpside_db::queries::account as acct;
 use sharpside_db::queries::mappings as map_q;
+use sharpside_db::queries::monitor;
 use sharpside_db::CopyOrderRow;
 use sharpside_mapping::types::ExecParams;
 use sharpside_mapping::unit::{convert_price, convert_size};
@@ -243,6 +244,13 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
         }
     }
 
+    // 4c. R1-C 重跟兜底：同 venue + Proportional 时，copy 在途+已成交净仓不得超源 trader 净仓 × ratio。
+    //     防止 trade_watch 宕机恢复后 hot 残差与逐笔信号双发同一净仓变化（R1，真钱重复下单）。
+    //     Fixed 无源相对上限（跳过）；跨 venue 单位不同（跳过）；无源快照（fail-open 不阻断）。
+    if let Err(reason) = check_re_follow_cap(state, order, source_venue, execute_venue, exec_size, exec_side).await {
+        return skip(state, order.id, &reason).await;
+    }
+
     // 5. 下单
     let _ = exec_side; // 已用于 Order
     if state.config.dry_run {
@@ -473,6 +481,111 @@ async fn load_follow_limits(
     })
 }
 
+/// R1-C 重跟兜底净仓上限：同 venue + Proportional 跟随时，本笔下单后 copy 在途+已成交净仓
+/// 不得超过 `ratio × 源 trader 净仓`。防止 trade_watch 宕机恢复后 hot 残差与逐笔信号双发
+/// 同一净仓变化（R1，真钱重复下单）。
+///
+/// 适用范围（不满足则 Ok 放行）：
+/// - 仅 trader 跟随（follow_address 非空）：identity 跟随的源 trader 未存于 copy_order，无法查源净仓。
+/// - 仅同 venue（source_venue == execute_venue）：跨 venue 单位不同，比较需映射，暂不覆盖。
+/// - 仅 Proportional sizing：Fixed 为绝对金额，无源相对上限。
+/// - 源 trader 无该 token 快照：fail-open（不阻断，避免新 token 永远跟不上）。
+///
+/// `exec_side`/`exec_size` 为换算后的执行侧量；同 venue 下与源侧同单位同方向。
+async fn check_re_follow_cap(
+    state: &AppState,
+    order: &CopyOrderRow,
+    source_venue: Platform,
+    execute_venue: Platform,
+    exec_size: f64,
+    exec_side: Side,
+) -> Result<(), String> {
+    if source_venue != execute_venue {
+        return Ok(());
+    }
+    let rel = match acct::get_follow(&state.db, order.follow_relation_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(order_id = %order.id, error = %e, "R1-C 取 follow_relation 失败，fail-open 放行");
+            return Ok(());
+        }
+    };
+    let (Some(fp), Some(fa)) = (rel.follow_platform.as_deref(), rel.follow_address.as_deref()) else {
+        // identity 跟随：源 trader 未存于 copy_order，无法查源净仓，fail-open。
+        return Ok(());
+    };
+    let cfg: sharpside_shared::FollowConfig = match serde_json::from_value(rel.config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(order_id = %order.id, error = %e, "R1-C 解析 FollowConfig 失败，fail-open 放行");
+            return Ok(());
+        }
+    };
+    let ratio = match cfg.sizing {
+        sharpside_shared::SizingMode::Proportional { ratio } => ratio,
+        sharpside_shared::SizingMode::Fixed { .. } => return Ok(()),
+    };
+
+    let source_net = match monitor::latest_snapshot_size_for_token(
+        &state.db,
+        fp,
+        fa,
+        &order.source_token_id,
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => return Ok(()), // 无快照 fail-open
+        Err(e) => {
+            tracing::warn!(order_id = %order.id, error = %e, "R1-C 查源净仓失败，fail-open 放行");
+            return Ok(());
+        }
+    };
+    let current = match acct::follow_inflight_net_for_token(
+        &state.db,
+        order.follow_relation_id,
+        &order.source_token_id,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(order_id = %order.id, error = %e, "R1-C 查 copy 在途净仓失败，fail-open 放行");
+            return Ok(());
+        }
+    };
+    let cap = ratio * source_net;
+    let over = decide_re_follow_cap(current, source_net, ratio, exec_size, exec_side);
+    if over {
+        return Err(format!(
+            "R1-C 重跟兜底：copy 在途+已成交净仓 {current:.4} + 本笔 {exec_size:.4} \
+             超 Proportional 上限 {cap:.4}（源净仓 {source_net:.4} × ratio {ratio}）"
+        ));
+    }
+    Ok(())
+}
+
+/// R1-C 纯决策：本笔下单是否构成"同向重复"——把 copy 净仓推到超过 `ratio × 源净仓` 的同向极值。
+/// 仅在订单方向与源净仓方向一致（开仓/加仓向）时校验；平仓向（BUY 对空头源 / SELL 对多头源）
+/// 不拦，避免快照滞后把正常平仓误判为重复。
+/// - BUY 且 source_net > 0：`current + exec_size > ratio*source_net + EPS` → 重复做多
+/// - SELL 且 source_net < 0：`current - exec_size < ratio*source_net - EPS` → 重复做空
+pub(crate) fn decide_re_follow_cap(
+    current: f64,
+    source_net: f64,
+    ratio: f64,
+    exec_size: f64,
+    exec_side: Side,
+) -> bool {
+    const EPS: f64 = 1e-6;
+    let cap = ratio * source_net;
+    match exec_side {
+        Side::Buy if source_net > EPS => current + exec_size > cap + EPS,
+        Side::Sell if source_net < -EPS => current - exec_size < cap - EPS,
+        _ => false,
+    }
+}
+
 async fn fail(state: &AppState, id: uuid::Uuid, reason: &str) -> Result<(), anyhow::Error> {
     acct::update_copy_order_status(&state.db, id, "failed", Some(reason)).await?;
     warn!(order_id = %id, reason, "失败");
@@ -677,6 +790,42 @@ const _: fn(Channel) -> () = |_| {};
 mod tests {
     use super::*;
     use sharpside_db::CopyOrderRow;
+
+    #[test]
+    fn re_follow_cap_buy_within_ratio_ok() {
+        // 源净仓 100，ratio 0.5 → 上限 50；当前 0，本笔 50 → 50 ≤ 50，不超
+        assert!(!decide_re_follow_cap(0.0, 100.0, 0.5, 50.0, Side::Buy));
+    }
+
+    #[test]
+    fn re_follow_cap_buy_duplicate_exceeds() {
+        // R1 双发：第一笔已占 50（在途），第二笔 50 → 100 > 上限 50 → 超（拦）
+        assert!(decide_re_follow_cap(50.0, 100.0, 0.5, 50.0, Side::Buy));
+    }
+
+    #[test]
+    fn re_follow_cap_buy_full_ratio_duplicate() {
+        // ratio 1.0：第一笔 100 已占，第二笔 100 → 200 > 100 → 超
+        assert!(decide_re_follow_cap(100.0, 100.0, 1.0, 100.0, Side::Buy));
+    }
+
+    #[test]
+    fn re_follow_cap_sell_short_duplicate() {
+        // 源净仓 -100（空），ratio 0.5 → 上限 -50；当前 -50，再卖 50 → -100 < -50 → 超
+        assert!(decide_re_follow_cap(-50.0, -100.0, 0.5, 50.0, Side::Sell));
+    }
+
+    #[test]
+    fn re_follow_cap_sell_close_long_ok() {
+        // 源净仓 +100（多），ratio 1.0 → 上限 +100；当前 +100，卖 100 → 0，未低于 -100+EPS，不超
+        assert!(!decide_re_follow_cap(100.0, 100.0, 1.0, 100.0, Side::Sell));
+    }
+
+    #[test]
+    fn re_follow_cap_epsilon_boundary() {
+        // 边界：current+exec 恰好等于 cap，EPS 容忍，不超
+        assert!(!decide_re_follow_cap(0.0, 100.0, 0.5, 50.0 + 1e-9, Side::Buy));
+    }
 
     /// 安全修复 1.4 DB 级幂等：仅需 PG（无需 Polymarket 网络）。
     /// 验证 `claim_copy_order_status` CAS + `insert_copy_execution` ON CONFLICT：

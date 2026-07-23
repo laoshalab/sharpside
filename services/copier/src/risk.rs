@@ -16,7 +16,8 @@ pub struct RiskContext {
     pub daily_notional_used: f64,
     pub open_positions: i64,
     pub recent_orders_in_window: i64,
-    /// 最近 N 条 copy_order 中从最新向前数的连续失败（failed/skipped）条数
+    /// 最近 N 条 copy_order 中从最新向前数的连续失败（failed）条数。
+    /// 不计 skipped：skip 非亏损，避免短暂抖动后永久自延续熔断。
     pub consecutive_failures: i32,
 }
 
@@ -210,11 +211,16 @@ pub fn check_slippage(
     Ok(())
 }
 
-/// 从最近 status 列表计算尾部连续失败条数（failed/skipped 视为失败）。
+/// 从最近 status 列表计算尾部连续**真实失败**条数（仅 `failed`）。
+///
+/// 不计 `skipped`：skip 表示"未成交"（滑点/余额/市场关闭/风控前置拒单），并非亏损，
+/// 烧亏损预算会令短暂 Venue 抖动后的连续 skip 永久自延续熔断（无自动恢复、无告警）。
+/// 与 rapid-flip 守卫（`count_recent_copy_orders` 仅计 pending/dispatched/submitted/filled）
+/// 保持同一口径：skip 不喂熔断，避免雪崩。
 pub fn count_trailing_failures(statuses: &[String]) -> i32 {
     statuses
         .iter()
-        .take_while(|s| matches!(s.as_str(), "failed" | "skipped"))
+        .take_while(|s| matches!(s.as_str(), "failed"))
         .count() as i32
 }
 
@@ -450,9 +456,20 @@ mod tests {
     #[test]
     fn trailing_failures_count() {
         assert_eq!(count_trailing_failures(&[]), 0);
+        // skipped 不计：避免短暂抖动后永久自延续熔断
+        assert_eq!(
+            count_trailing_failures(&["skipped".into(), "skipped".into(), "skipped".into()]),
+            0
+        );
+        // 仅 failed 计入尾部连续失败
+        assert_eq!(
+            count_trailing_failures(&["failed".into(), "failed".into(), "filled".into()]),
+            2
+        );
+        // 尾部连续 failed：从最新往前数到首个非 failed 停。skipped 非失败，故在此停 → 1
         assert_eq!(
             count_trailing_failures(&["failed".into(), "skipped".into(), "filled".into()]),
-            2
+            1
         );
         assert_eq!(
             count_trailing_failures(&["filled".into(), "failed".into()]),

@@ -203,6 +203,32 @@ pub async fn latest_snapshots(
     Ok(rows)
 }
 
+/// R1-C 重跟兜底：取某 (platform, address, token_id) 最近一次快照的净仓 size（带符号，
+/// 正=多 负=空）。无快照返回 None（调用方 fail-open，不阻断跟单）。
+///
+/// 用于 copier 下单前校验 copy 用户净仓不超过源 trader 净仓 × ratio（Proportional 同 venue）。
+pub async fn latest_snapshot_size_for_token(
+    pool: &PgPool,
+    platform: &str,
+    address: &str,
+    token_id: &str,
+) -> Result<Option<f64>, DbError> {
+    let row: Option<(Option<f64>,)> = sqlx::query_as(
+        r#"
+        SELECT size FROM trader_hub.trader_positions_snapshot
+        WHERE platform = $1 AND address = $2 AND token_id = $3
+        ORDER BY captured_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(platform)
+    .bind(address)
+    .bind(token_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(s,)| s))
+}
+
 /// 第 3 层：某 `(platform, address)` 在 `before` 时刻**之前**最近一轮扫描的每 token 快照。
 ///
 /// diff 对账用"落后一轮闭合窗口"：用 `latest_snapshots`（上一轮 T_prev）减去本函数返回的
