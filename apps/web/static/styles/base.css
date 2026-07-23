@@ -831,6 +831,8 @@ button.ghost:hover { border-color: var(--c-muted); color: var(--c-text); }
 .copy-history-section { margin-top: var(--sp-6); padding-top: var(--sp-4); border-top: 1px solid var(--c-border); }
 .copy-history-section .page-head { margin-bottom: var(--sp-3); }
 .copy-history-section h2 { margin: 0; font-size: var(--fs-20); }
+/* 长 market_id / 多列时卡片内横向滚动，避免撑破右边界 */
+.copy-history-section > .card { overflow-x: auto; }
 
 /* 账户设置快捷入口 */
 .settings-hub {

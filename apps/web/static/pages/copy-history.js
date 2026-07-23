@@ -86,10 +86,18 @@ function renderTable(card, rows) {
     columns: [
       { key: 'executed_at', label: t('copyHistory.time'), render: r => r.executed_at ? new Date(r.executed_at).toLocaleString() : '—' },
       { key: 'follow', label: t('copyHistory.follow'), render: r => r.follow_alias || (r.follow_address || r.follow_relation_id || '—').toString().slice(0, 8) },
-      { key: 'market_id', label: t('copyHistory.colMarket'), render: r => r.market_id || r.execute_market_id || '—' },
+      { key: 'market_id', label: t('copyHistory.colMarket'), render: r => {
+          const id = r.market_id || r.execute_market_id;
+          if (!id) return '—';
+          const s = String(id);
+          return `<span class="muted" title="${escapeAttr(s)}">${escapeText(s.length > 14 ? s.slice(0, 12) + '…' : s)}</span>`;
+        } },
       { key: 'side', label: t('copyHistory.colSide') },
       { key: 'filled_price', label: t('copyHistory.colPrice'), render: r => r.filled_price != null ? Number(r.filled_price).toFixed(4) : (r.price != null ? Number(r.price).toFixed(4) : '—') },
-      { key: 'filled_size', label: t('copyHistory.colSize'), render: r => r.filled_size ?? r.size ?? '—' },
+      { key: 'filled_size', label: t('copyHistory.colSize'), render: r => {
+          const v = r.filled_size ?? r.size;
+          return v != null && v !== '' && !Number.isNaN(Number(v)) ? Number(v).toFixed(4) : (v ?? '—');
+        } },
       { key: 'pnl', label: 'P&L', render: r => r.realized_pnl != null ? `<span class="${r.realized_pnl >= 0 ? 'pos' : 'neg'}">${r.realized_pnl >= 0 ? '+' : ''}$${Number(r.realized_pnl).toFixed(2)}</span>` : t('copyHistory.openPosition') },
       { key: 'fee', label: 'fee', render: r => r.fee != null ? '$' + Number(r.fee).toFixed(2) : '—' },
       { key: 'status', label: t('copyHistory.status'), render: r => {
