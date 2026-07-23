@@ -14,6 +14,9 @@ Cargo.lock.bak
 .env.local
 *.local.toml
 
+# KMS master key（LocalKms 落盘密钥，绝不入库）
+/.kms
+
 # Docker
 /infra/data
 

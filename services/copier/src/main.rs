@@ -117,23 +117,41 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 真钱门禁：COPIER_DRY_RUN=0 必须 production + LocalKms（禁止 DevKms / 无 KMS）。
+    // 唯一例外：dev 下显式设 SHARPSIDE_ALLOW_DEVKMS_E2E=1 时放行 DevKms 实盘
+    // （仅供 e2e_real_sign / e2e_real_trade 脚本验证签名/提交链路；生产忽略此 env，
+    //   仍强制 production + LocalKms，杜绝误用）。
     if !config.dry_run {
+        let allow_devkms_e2e =
+            std::env::var("SHARPSIDE_ALLOW_DEVKMS_E2E").ok().as_deref() == Some("1");
         if !sharpside_shared::secrets::is_production() {
-            return Err(anyhow::anyhow!(
-                "COPIER_DRY_RUN=0 须 APP_ENV=production（当前非生产，拒绝实盘）"
-            ));
+            if !allow_devkms_e2e {
+                return Err(anyhow::anyhow!(
+                    "COPIER_DRY_RUN=0 须 APP_ENV=production，或 dev 下显式设 SHARPSIDE_ALLOW_DEVKMS_E2E=1（仅 e2e）"
+                ));
+            }
+            if kms.is_none() {
+                return Err(anyhow::anyhow!(
+                    "COPIER_DRY_RUN=0 须 KMS 已启用（dev e2e 设 SHARPSIDE_KMS_DEV_PLAINTEXT=1）"
+                ));
+            }
+            tracing::warn!(
+                kms = kms.as_ref().map(|k| k.name()),
+                "COPIER_DRY_RUN=0：dev e2e 实盘已放行（SHARPSIDE_ALLOW_DEVKMS_E2E=1）——\
+                 仅限本地 e2e，生产须 APP_ENV=production + LocalKms"
+            );
+        } else {
+            if std::env::var("SHARPSIDE_KMS_MASTER_KEY_PATH").is_err() {
+                return Err(anyhow::anyhow!(
+                    "COPIER_DRY_RUN=0 须 SHARPSIDE_KMS_MASTER_KEY_PATH（LocalKms 站内签）"
+                ));
+            }
+            if kms.is_none() {
+                return Err(anyhow::anyhow!(
+                    "COPIER_DRY_RUN=0 须 LocalKms 已启用（构造失败或未注入）"
+                ));
+            }
+            tracing::warn!("COPIER_DRY_RUN=0：实盘执行已启用（production + LocalKms）");
         }
-        if std::env::var("SHARPSIDE_KMS_MASTER_KEY_PATH").is_err() {
-            return Err(anyhow::anyhow!(
-                "COPIER_DRY_RUN=0 须 SHARPSIDE_KMS_MASTER_KEY_PATH（LocalKms 站内签）"
-            ));
-        }
-        if kms.is_none() {
-            return Err(anyhow::anyhow!(
-                "COPIER_DRY_RUN=0 须 LocalKms 已启用（构造失败或未注入）"
-            ));
-        }
-        tracing::warn!("COPIER_DRY_RUN=0：实盘执行已启用（production + LocalKms）");
     }
 
     let registry = build_registry(kms);

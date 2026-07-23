@@ -1559,6 +1559,17 @@ mod tests {
             if p <= 0.0 {
                 continue;
             }
+            // 窄价差过滤：spread/mid ≤ 4%（aggressive 买取 best_ask 时相对 mid 滑点 ≤200bps，
+            // 必过 check_slippage 200bps 门禁）。避免选中 0.001/0.999 这类单边极端价差市场被风控跳过。
+            let spread = ba_p - bb_p;
+            if spread / mid > 0.04 {
+                continue;
+            }
+            // 价位过滤：mid ∈ [0.05, 0.95] 且 best_ask < 0.99，避开近决断市场（买在 ≈1.0 无意义且
+            // Polymarket 拒 price≥1 的买单），选 mid 适中的正常市场确保真成交有意义。
+            if !(0.05..=0.95).contains(&mid) || ba_p >= 0.99 {
+                continue;
+            }
             // 拉取市场真实 minimum_order_size（新 min_size 风控用）
             let ms = client
                 .clob_market(&cid)
@@ -1569,7 +1580,9 @@ mod tests {
                 .max(5.0);
             token_id = tid;
             condition_id = cid;
-            price = p;
+            // 信号价取 best_ask（源钱包"买"吃 ask 的真实成交价）：aggressive 跟随再吃当前 ask，
+            // 必立即成交；floor(mid) 作信号价会被 200bps cap 钳到 ask 下方挂死不成交。
+            price = ba_p;
             min_size = ms;
             eprintln!(
                 "step5 选中 market q={:?} bid={bb_p} ask={ba_p} mid={mid} tick={tick} 挂单价={price} min_size={min_size}",

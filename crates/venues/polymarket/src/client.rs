@@ -352,7 +352,9 @@ impl PolymarketClient {
         // CLOB `/book` 只收 `token_id`（`?market=&asset=` 会返回 "Invalid token id"）。
         // `market_id` 参数保留以兼容 venue trait 签名；响应里的 `market` 字段即 condition_id。
         let url = format!("{}/book", self.clob_api);
-        get_json(&self.http, &url, &[("token_id", token_id)]).await
+        let mut dto: BookDto = get_json(&self.http, &url, &[("token_id", token_id)]).await?;
+        sort_book_best_first(&mut dto);
+        Ok(dto)
     }
 
     /// `GET /markets/{condition_id}` → CLOB 市场元数据（含 `neg_risk`、`active`、`accepting_orders`）。
@@ -751,6 +753,34 @@ async fn get_json<T: for<'de> Deserialize<'de>>(
     http.get(url).query(params).send().await?.json().await
 }
 
+/// 解析 `BookLevelDto.price`（字符串）为 f64；失败返回 `default`（bids 用 0.0、asks 用 INFINITY，
+/// 使坏行在 best-first 排序中沉底而不污染 best 档）。
+fn lvl_price(lvl: &crate::dto::BookLevelDto, default: f64) -> f64 {
+    lvl.price
+        .as_deref()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|p| *p > 0.0 && p.is_finite())
+        .unwrap_or(default)
+}
+
+/// P0：Polymarket CLOB `/book` 返回 bids **升序**（最差/最低买价在前）、asks **降序**
+///（最差/最高卖价在前）。原地排序为 best-first：bids 降序（最高买价在前）、asks 升序
+///（最低卖价在前），使所有消费者 `bids.first()/asks.first()` 取到 best 档（mid / 滑点 /
+/// 激进定价基准）。否则会取到最差档（如 0.001/0.999 灰尘盘口）→ mid 错乱 → 滑点门禁
+/// 对任何真实市场都拒单，阻断所有真实交易。
+fn sort_book_best_first(dto: &mut crate::dto::BookDto) {
+    dto.bids.sort_unstable_by(|a, b| {
+        let pa = lvl_price(a, 0.0);
+        let pb = lvl_price(b, 0.0);
+        pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    dto.asks.sort_unstable_by(|a, b| {
+        let pa = lvl_price(a, f64::INFINITY);
+        let pb = lvl_price(b, f64::INFINITY);
+        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,5 +972,59 @@ mod tests {
             "/markets/{{condition_id}} 的 neg_risk 须为 true"
         );
         assert_eq!(nr, cm.neg_risk);
+    }
+
+    /// P0 回归：Polymarket CLOB `/book` 原始返回 bids 升序、asks 降序（最差在前）。
+    /// `sort_book_best_first` 须把 best 档翻到 `first()`（bids 最高买价、asks 最低卖价），
+    /// 否则 copier 会用最差档算 mid → 滑点门禁对真实市场全部拒单。
+    #[test]
+    fn sort_book_best_first_promotes_best_levels() {
+        use crate::dto::{BookDto, BookLevelDto};
+        // 原始顺序：bids 升序 0.001..0.47，asks 降序 0.999..0.472（Polymarket 实际返回形态）。
+        let mut dto = BookDto {
+            bids: vec![
+                BookLevelDto { price: Some("0.001".into()), size: Some("1".into()) },
+                BookLevelDto { price: Some("0.47".into()), size: Some("5".into()) },
+                BookLevelDto { price: Some("0.23".into()), size: Some("2".into()) },
+            ],
+            asks: vec![
+                BookLevelDto { price: Some("0.999".into()), size: Some("1".into()) },
+                BookLevelDto { price: Some("0.472".into()), size: Some("5".into()) },
+                BookLevelDto { price: Some("0.80".into()), size: Some("2".into()) },
+            ],
+            market: Some("0xcond".into()),
+            asset_id: None,
+        };
+        sort_book_best_first(&mut dto);
+        // best bid = 最高买价 0.47 在前
+        assert_eq!(dto.bids.first().unwrap().price.as_deref(), Some("0.47"));
+        assert_eq!(dto.bids.last().unwrap().price.as_deref(), Some("0.001"));
+        // best ask = 最低卖价 0.472 在前
+        assert_eq!(dto.asks.first().unwrap().price.as_deref(), Some("0.472"));
+        assert_eq!(dto.asks.last().unwrap().price.as_deref(), Some("0.999"));
+    }
+
+    /// P0 回归：坏行（非正/非数字 price）须沉底，不污染 best 档。
+    #[test]
+    fn sort_book_best_first_sinks_malformed_levels() {
+        use crate::dto::{BookDto, BookLevelDto};
+        let mut dto = BookDto {
+            bids: vec![
+                BookLevelDto { price: Some("0.47".into()), size: Some("5".into()) },
+                BookLevelDto { price: Some("garbage".into()), size: None },
+                BookLevelDto { price: None, size: Some("1".into()) },
+                BookLevelDto { price: Some("0".into()), size: Some("1".into()) },
+            ],
+            asks: vec![
+                BookLevelDto { price: Some("0.472".into()), size: Some("5".into()) },
+                BookLevelDto { price: Some("garbage".into()), size: None },
+                BookLevelDto { price: None, size: Some("1".into()) },
+            ],
+            market: None,
+            asset_id: None,
+        };
+        sort_book_best_first(&mut dto);
+        assert_eq!(dto.bids.first().unwrap().price.as_deref(), Some("0.47"));
+        assert_eq!(dto.asks.first().unwrap().price.as_deref(), Some("0.472"));
     }
 }
