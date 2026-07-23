@@ -13,9 +13,9 @@ pub mod types;
 // 从 `sharpside-shared` re-export 基础枚举，给 adapter 作者单一 import 入口。
 pub use sharpside_shared::{Platform, Side};
 pub use types::{
-    AuthModel, Balance, Credential, Fill, Geo, LeaderboardQuery, Market, MarketQuery, Order,
-    OrderBook, OrderBookLevel, OrderState, OrderStatus, OrderType, Pagination, Position,
-    RedeemResult, Trade, Trader, Unit, VenueCapabilities, VenueInfo, WithdrawResult,
+    AuthModel, Balance, Credential, Fill, Geo, LeaderboardQuery, Market, MarketQuery, MergeResult,
+    Order, OrderBook, OrderBookLevel, OrderState, OrderStatus, OrderType, Pagination, Position,
+    RedeemResult, SplitResult, Trade, Trader, Unit, VenueCapabilities, VenueInfo, WithdrawResult,
 };
 
 use async_trait::async_trait;
@@ -136,6 +136,38 @@ pub trait Venue: Send + Sync {
         _amount: f64,
     ) -> Result<RedeemResult, VenueError> {
         Err(VenueError::Unsupported("redeem"))
+    }
+
+    /// 拆分：把 `amount` collateral（如 pUSD）锁入 CTF，铸造各 outcome token
+    /// （二元市场：1 pUSD → 1 YES + 1 NO）。
+    ///
+    /// - `condition_id`：市场 conditionId（bytes32 hex，CTF splitPositions 入参）。
+    /// - `amount`：拆分的 collateral 数量（人类单位，6 decimals）。
+    ///
+    /// 默认 Unsupported，仅支持拆分的 Venue（Polymarket Deposit Wallet）实现。
+    async fn split(
+        &self,
+        _cred: &Credential,
+        _condition_id: &str,
+        _amount: f64,
+    ) -> Result<SplitResult, VenueError> {
+        Err(VenueError::Unsupported("split"))
+    }
+
+    /// 合并：烧掉 `amount` 的各 outcome token，返还 collateral
+    /// （二元市场：1 YES + 1 NO → 1 pUSD）。
+    ///
+    /// - `condition_id`：市场 conditionId（bytes32 hex，CTF mergePositions 入参）。
+    /// - `amount`：合并的每组 outcome token 数量（人类单位，6 decimals）。
+    ///
+    /// 默认 Unsupported，仅支持合并的 Venue（Polymarket Deposit Wallet）实现。
+    async fn merge(
+        &self,
+        _cred: &Credential,
+        _condition_id: &str,
+        _amount: f64,
+    ) -> Result<MergeResult, VenueError> {
+        Err(VenueError::Unsupported("merge"))
     }
 
     /// 盘口深度（滑点保护与最小 notional 校验用）。
@@ -283,6 +315,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, VenueError::Unsupported("leaderboard")));
+        // 新增 split/merge 默认亦 Unsupported（仅 Polymarket Deposit Wallet 实现）。
+        assert!(matches!(
+            exec.split(&Credential::Wallet { encrypted_handle: "x".into() }, "c", 1.0)
+                .await
+                .unwrap_err(),
+            VenueError::Unsupported("split")
+        ));
+        assert!(matches!(
+            exec.merge(&Credential::Wallet { encrypted_handle: "x".into() }, "c", 1.0)
+                .await
+                .unwrap_err(),
+            VenueError::Unsupported("merge")
+        ));
     }
 
     #[tokio::test]

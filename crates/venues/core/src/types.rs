@@ -218,6 +218,11 @@ pub struct Order {
     /// GTD 过期时间（unix 秒）。仅 `OrderType::Gtd` 时有意义；None → wire "0"（即 GTC 语义）。
     #[serde(default)]
     pub expiration: Option<i64>,
+    /// Post-only：仅做 maker，订单价格若会立即吃盘口（cross）则被服务端拒绝而非成交。
+    /// 仅对限价类型（Gtc/Gtd）有意义；与 Fok/Fak 互斥（place_order 会拒）。
+    /// wire-only 字段（V2 `postOnly`），不进签名。默认 false。
+    #[serde(default)]
+    pub post_only: bool,
 }
 
 /// 成交回报。对应 `docs/VENUE_DESIGN.md` §3。
@@ -280,6 +285,36 @@ pub struct WithdrawResult {
 /// `tx_hash` 为链上交易哈希（relayer gasless 提交后返回）；未确认时为 None。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedeemResult {
+    pub condition_id: String,
+    pub amount: f64,
+    pub tx_hash: Option<String>,
+    /// relayer transactionID（用于后续对账/轮询）。
+    pub relayer_tx_id: Option<String>,
+}
+
+/// 拆分结果。对应 `docs/CHANNEL_A_SIGNING.md` §4.3。
+///
+/// 把 `amount` pUSD 锁入 CTF，铸造各 outcome token（二元市场：1 pUSD → 1 YES + 1 NO）。
+/// `condition_id` 为市场 conditionId（CTF splitPositions 入参）。
+/// `amount` 为拆分的 pUSD 数量（人类单位，6 decimals）。
+/// `tx_hash` 为链上交易哈希（relayer gasless 提交后返回）；未确认时为 None。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitResult {
+    pub condition_id: String,
+    pub amount: f64,
+    pub tx_hash: Option<String>,
+    /// relayer transactionID（用于后续对账/轮询）。
+    pub relayer_tx_id: Option<String>,
+}
+
+/// 合并结果。对应 `docs/CHANNEL_A_SIGNING.md` §4.3。
+///
+/// 烧掉 `amount` 的各 outcome token（二元市场：1 YES + 1 NO → 1 pUSD），返还 pUSD。
+/// `condition_id` 为市场 conditionId（CTF mergePositions 入参）。
+/// `amount` 为合并的每组 outcome token 数量（人类单位，6 decimals）。
+/// `tx_hash` 为链上交易哈希（relayer gasless 提交后返回）；未确认时为 None。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeResult {
     pub condition_id: String,
     pub amount: f64,
     pub tx_hash: Option<String>,

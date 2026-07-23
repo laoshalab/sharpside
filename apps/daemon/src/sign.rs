@@ -74,7 +74,7 @@ pub async fn execute_polymarket(
     if clob_post_enabled() {
         let client = PolymarketClient::new();
         let order_id = client
-            .post_order(&signed, OrderType::Gtc, None)
+            .post_order(&signed, OrderType::Gtc, None, false)
             .await
             .map_err(|e| format!("CLOB POST 失败: {e}"))?;
         Ok(LocalFill {

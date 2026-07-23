@@ -404,13 +404,15 @@ impl PolymarketClient {
     /// 提交已签名订单到 Polymarket CLOB。返回 CLOB 订单 id。仅 `POLYMARKET_CLOB_POST=1` 时调用；
     /// 离线/无网络环境会在此处报 reqwest 错误（预期）。
     ///
-    /// `order_type` / `expiration` 为 wire-only 字段（不进 EIP-712 签名 struct）：
+    /// `order_type` / `expiration` / `post_only` 为 wire-only 字段（不进 EIP-712 签名 struct）：
     /// - GTC/FOK/FAK → expiration 传 None（wire "0"）；GTD → 传 Some(unix_secs)。
+    /// - post_only=true 仅对限价（Gtc/Gtd）有意义，与 Fok/Fak 互斥（由调用方/上游校验）。
     pub async fn post_order(
         &self,
         signed: &crate::clob::SignedOrder,
         order_type: OrderType,
         expiration: Option<i64>,
+        post_only: bool,
     ) -> Result<String, reqwest::Error> {
         let url = format!("{}/order", self.clob_api);
         let side_str = if signed.side == 0 { "BUY" } else { "SELL" };
@@ -433,6 +435,7 @@ impl PolymarketClient {
             "signature": signed.signature,
             "owner": signed.signer_address.to_string(),
             "orderType": order_type_wire(order_type),
+            "postOnly": post_only,
         });
         let resp: serde_json::Value = self.http.post(url).json(&body).send().await?.json().await?;
         Ok(resp
@@ -461,6 +464,7 @@ impl PolymarketClient {
         l2_poly_address: alloy_primitives::Address,
         order_type: OrderType,
         expiration: Option<i64>,
+        post_only: bool,
     ) -> Result<String, String> {
         let path = "/order";
         let url = format!("{}{}", self.clob_api, path);
@@ -471,6 +475,7 @@ impl PolymarketClient {
         // - `expiration`：GTC/FOK/FAK 传 "0"；GTD 传 unix 秒字符串。签名 EIP-712 struct 不含 expiration/taker，但 wire body 含 expiration
         // - 顶层 `owner` = L2 API key（非 signer 地址；官方测试断言 `owner=="api-key-uuid"`）
         // - 顶层 `deferExec`/`postOnly`；无 `taker`（OrderV2 无此字段，JSON 丢弃）
+        // - `postOnly`：仅 maker，cross 即拒；仅限价（Gtc/Gtd）有意义。
         let salt_int = u64::try_from(signed.salt).unwrap_or(0);
         let expiration_str = expiration.unwrap_or(0).to_string();
         let body_json = serde_json::json!({
@@ -492,7 +497,7 @@ impl PolymarketClient {
             "owner": l2_api_key,
             "orderType": order_type_wire(order_type),
             "deferExec": false,
-            "postOnly": false,
+            "postOnly": post_only,
         });
         let body_str = serde_json::to_string(&body_json).unwrap_or_default();
         let headers = crate::clob::l2_headers(

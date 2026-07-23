@@ -150,6 +150,73 @@ pub fn redeem_positions_calldata(
     Bytes::from(out)
 }
 
+/// CTF `splitPosition` selector = `0x72ce4275`。
+/// 函数签名：`splitPosition(address,bytes32,bytes32,uint256[],uint256)`。
+/// = keccak256("splitPosition(address,bytes32,bytes32,uint256[],uint256)")[..4]。
+const SELECTOR_SPLIT_POSITION: [u8; 4] = [0x72, 0xce, 0x42, 0x75];
+
+/// CTF `mergePositions` selector = `0x9e7212ad`。
+/// 函数签名：`mergePositions(address,bytes32,bytes32,uint256[],uint256)`。
+/// = keccak256("mergePositions(address,bytes32,bytes32,uint256[],uint256)")[..4]。
+const SELECTOR_MERGE_POSITIONS: [u8; 4] = [0x9e, 0x72, 0x12, 0xad];
+
+/// 构造 `splitPosition` / `mergePositions` 共用 calldata（同签名同编码）。
+///
+/// 签名：`(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId,
+///         uint256[] partition, uint256 amount)`。
+/// - `collateral`：pUSD 地址（`contracts::COLLATERAL`）。
+/// - `condition_id`：市场 conditionId（0x 前缀 hex，bytes32）。
+/// - `index_sets`：二元市场固定 `[1, 2]`（NO=1, YES=2）。
+/// - `amount`：collateral 原子单位（6 decimals，如 7.0 pUSD → 7_000_000）。
+///
+/// ABI 编码（动态数组在 slot3，尾部 uint256 amount 为静态、仍在 head）：
+///   selector | addr | bytes32(0) | bytes32(cond) | offset(0xa0) | amount | len | elem0 | elem1
+fn split_merge_calldata(selector: [u8; 4], collateral: Address, condition_id: &str, index_sets: &[u64], amount: U256) -> Bytes {
+    let cond = parse_bytes32(condition_id);
+    // head = 5 slots（collateral, parent, cond, offset, amount）= 160 = 0xa0
+    let mut out = Vec::with_capacity(4 + 5 * 32 + 32 + index_sets.len() * 32);
+    out.extend_from_slice(&selector);
+    // arg0: collateralToken（address，左填充 32）
+    out.extend_from_slice(&collateral.left_pad_32()[..]);
+    // arg1: parentCollectionId（bytes32 全 0）
+    out.extend_from_slice(&[0u8; 32]);
+    // arg2: conditionId（bytes32）
+    out.extend_from_slice(&cond);
+    // arg3: offset 到 partition 数据 = 5*32 = 160 = 0xa0
+    let offset = U256::from(5u64 * 32u64);
+    out.extend_from_slice(&offset.left_pad_32()[..]);
+    // arg4: amount（uint256，静态，紧随 offset 之后在 head）
+    out.extend_from_slice(&amount.left_pad_32()[..]);
+    // 动态数据：数组长度 + 各元素
+    out.extend_from_slice(&U256::from(index_sets.len()).left_pad_32()[..]);
+    for s in index_sets {
+        out.extend_from_slice(&U256::from(*s).left_pad_32()[..]);
+    }
+    Bytes::from(out)
+}
+
+/// CTF `splitPosition(pUSD, 0, conditionId, [1,2], amount)` calldata。
+/// 锁 `amount` pUSD 铸造各 outcome token（1 pUSD → 1 YES + 1 NO）。
+pub fn split_positions_calldata(
+    collateral: Address,
+    condition_id: &str,
+    index_sets: &[u64],
+    amount: U256,
+) -> Bytes {
+    split_merge_calldata(SELECTOR_SPLIT_POSITION, collateral, condition_id, index_sets, amount)
+}
+
+/// CTF `mergePositions(pUSD, 0, conditionId, [1,2], amount)` calldata。
+/// 烧 `amount` 各 outcome token 返还 pUSD（1 YES + 1 NO → 1 pUSD）。
+pub fn merge_positions_calldata(
+    collateral: Address,
+    condition_id: &str,
+    index_sets: &[u64],
+    amount: U256,
+) -> Bytes {
+    split_merge_calldata(SELECTOR_MERGE_POSITIONS, collateral, condition_id, index_sets, amount)
+}
+
 /// 解析 0x 前缀 hex conditionId 为 bytes32。长度不足/超长返回全 0（链上会拒，由调用方兜底）。
 fn parse_bytes32(s: &str) -> [u8; 32] {
     let hex_s = s.trim().trim_start_matches("0x");
@@ -374,6 +441,52 @@ mod tests {
         // elem0 = 1, elem1 = 2
         assert_eq!(U256::from_be_slice(&cd[4 + 160..4 + 192]), U256::from(1u64));
         assert_eq!(U256::from_be_slice(&cd[4 + 192..4 + 224]), U256::from(2u64));
+    }
+
+    #[test]
+    fn split_positions_calldata_shape_and_encoding() {
+        // splitPosition(pUSD, 0, conditionId, [1,2], amount)。
+        let pusd = addr(contracts::COLLATERAL);
+        let cond = "0xe322faca2a534900680db54e3a4349a61427d347b6f906d2eeb01f81ae1b082c";
+        let amount = U256::from(7_000_000u64); // 7.0 pUSD（6 decimals）
+        let cd = split_positions_calldata(pusd, cond, &[1, 2], amount);
+        // selector
+        assert_eq!(&cd[..4], &SELECTOR_SPLIT_POSITION);
+        // 总长 = 4 + 5*32 (head: collateral,parent,cond,offset,amount) + 32 (len) + 2*32 (elems) = 260
+        assert_eq!(cd.len(), 4 + 5 * 32 + 32 + 2 * 32);
+        // arg0: collateralToken
+        assert_eq!(&cd[4 + 12..4 + 32], pusd.as_slice());
+        // arg1: parentCollectionId 全 0
+        assert_eq!(&cd[4 + 32..4 + 64], &[0u8; 32]);
+        // arg2: conditionId
+        let cond_bytes = hex::decode(cond.trim_start_matches("0x")).unwrap();
+        assert_eq!(&cd[4 + 64..4 + 96], cond_bytes.as_slice());
+        // arg3: offset = 0xa0 = 160
+        assert_eq!(U256::from_be_slice(&cd[4 + 96..4 + 128]), U256::from(160u64));
+        // arg4: amount = 7_000_000
+        assert_eq!(U256::from_be_slice(&cd[4 + 128..4 + 160]), amount);
+        // 数组长度 = 2
+        assert_eq!(U256::from_be_slice(&cd[4 + 160..4 + 192]), U256::from(2u64));
+        // elem0 = 1, elem1 = 2
+        assert_eq!(U256::from_be_slice(&cd[4 + 192..4 + 224]), U256::from(1u64));
+        assert_eq!(U256::from_be_slice(&cd[4 + 224..4 + 256]), U256::from(2u64));
+    }
+
+    #[test]
+    fn merge_positions_calldata_shape_and_encoding() {
+        // mergePositions(pUSD, 0, conditionId, [1,2], amount) —— 与 split 同编码、不同 selector。
+        let pusd = addr(contracts::COLLATERAL);
+        let cond = "0xe322faca2a534900680db54e3a4349a61427d347b6f906d2eeb01f81ae1b082c";
+        let amount = U256::from(3_000_000u64); // 3.0 pUSD
+        let cd = merge_positions_calldata(pusd, cond, &[1, 2], amount);
+        assert_eq!(&cd[..4], &SELECTOR_MERGE_POSITIONS);
+        assert_eq!(cd.len(), 4 + 5 * 32 + 32 + 2 * 32);
+        // amount 在 arg4 槽
+        assert_eq!(U256::from_be_slice(&cd[4 + 128..4 + 160]), amount);
+        // split 与 merge 仅 selector 不同，其余字节相同
+        let cd_split = split_positions_calldata(pusd, cond, &[1, 2], amount);
+        assert_eq!(&cd_split[4..], &cd[4..]);
+        assert_ne!(&cd_split[..4], &cd[..4]);
     }
 
     #[test]

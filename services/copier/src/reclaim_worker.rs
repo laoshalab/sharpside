@@ -137,6 +137,7 @@ async fn retry_one(state: &AppState, order: &CopyOrderRow) -> RetryOutcome {
         // 幂等重试沿用原订单的 GTC 语义（与首次派发一致）。
         order_type: sharpside_venues_core::OrderType::Gtc,
         expiration: None,
+        post_only: false,
     };
     match venue.place_order(&cred, order_req).await {
         Ok(fill) => {
@@ -173,6 +174,7 @@ mod tests {
             order_timestamp_ms: Some(999),
             order_type: sharpside_venues_core::OrderType::Gtc,
             expiration: None,
+            post_only: false,
         };
         assert_eq!(o.idempotency_salt, Some(123));
         assert_eq!(o.order_timestamp_ms, Some(999));

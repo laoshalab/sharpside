@@ -81,6 +81,7 @@ mod tests {
             order_timestamp_ms: None,
             order_type: sharpside_venues_core::OrderType::Gtc,
             expiration: None,
+            post_only: false,
         }
     }
 

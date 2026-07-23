@@ -201,6 +201,13 @@ impl Venue for PolymarketVenue {
     }
 
     async fn place_order(&self, cred: &Credential, order: Order) -> Result<Fill, VenueError> {
+        // post-only 仅对限价（Gtc/Gtd）有意义；与市价（Fok/Fak）互斥，提前拒单避免撞服务端 400。
+        if order.post_only && matches!(order.order_type, OrderType::Fok | OrderType::Fak) {
+            return Err(VenueError::Auth(format!(
+                "post_only 与市价类型 {:?} 互斥（仅限价 Gtc/Gtd 可 post-only）",
+                order.order_type
+            )));
+        }
         match cred {
             Credential::DepositWalletDelegated {
                 deposit_wallet_address,
@@ -262,6 +269,7 @@ impl Venue for PolymarketVenue {
                             signer.address(),
                             order.order_type,
                             order.expiration,
+                            order.post_only,
                         )
                         .await
                         .map_err(VenueError::Auth)?;
@@ -319,7 +327,7 @@ impl Venue for PolymarketVenue {
                 if live {
                     let order_id = self
                         .client
-                        .post_order(&signed, order.order_type, order.expiration)
+                        .post_order(&signed, order.order_type, order.expiration, order.post_only)
                         .await?;
                     Ok(Fill {
                         order_id,
@@ -811,6 +819,202 @@ impl Venue for PolymarketVenue {
             tx_hash,
             relayer_tx_id,
         })
+    }
+
+    /// 拆分：锁 `amount` pUSD 铸造各 outcome token（二元：1 pUSD → 1 YES + 1 NO）。
+    /// 对应 `docs/CHANNEL_A_SIGNING.md` §4.3。
+    ///
+    /// 链路同 redeem：解 owner EOA 私钥（KMS）→ `CTF.splitPosition(pUSD, 0, conditionId, [1,2], amount)`
+    /// → relayer WALLET batch 提交 → 轮询至确认。gasless。仅标准市场（neg-risk 后补）。
+    async fn split(
+        &self,
+        cred: &Credential,
+        condition_id: &str,
+        amount: f64,
+    ) -> Result<sharpside_venues_core::SplitResult, VenueError> {
+        let (deposit, signer, tx_hash, relayer_tx_id) = self
+            .submit_split_merge(cred, condition_id, amount, SplitMerge::Split)
+            .await?;
+        let _ = deposit;
+        let _ = signer;
+        Ok(sharpside_venues_core::SplitResult {
+            condition_id: condition_id.to_string(),
+            amount,
+            tx_hash,
+            relayer_tx_id,
+        })
+    }
+
+    /// 合并：烧 `amount` 各 outcome token 返还 pUSD（二元：1 YES + 1 NO → 1 pUSD）。
+    /// 对应 `docs/CHANNEL_A_SIGNING.md` §4.3。
+    ///
+    /// 链路同 split，calldata 走 `CTF.mergePositions(pUSD, 0, conditionId, [1,2], amount)`。
+    async fn merge(
+        &self,
+        cred: &Credential,
+        condition_id: &str,
+        amount: f64,
+    ) -> Result<sharpside_venues_core::MergeResult, VenueError> {
+        let (deposit, signer, tx_hash, relayer_tx_id) = self
+            .submit_split_merge(cred, condition_id, amount, SplitMerge::Merge)
+            .await?;
+        let _ = deposit;
+        let _ = signer;
+        Ok(sharpside_venues_core::MergeResult {
+            condition_id: condition_id.to_string(),
+            amount,
+            tx_hash,
+            relayer_tx_id,
+        })
+    }
+}
+
+impl PolymarketVenue {
+    /// split / merge 共用提交逻辑：校验凭证 → 构造 calldata → relayer WALLET batch → 轮询。
+    /// 返回 (deposit, signer, tx_hash, relayer_tx_id)；split/merge 仅 calldata selector/语义不同。
+    async fn submit_split_merge(
+        &self,
+        cred: &Credential,
+        condition_id: &str,
+        amount: f64,
+        which: SplitMerge,
+    ) -> Result<(Address, alloy_signer_local::PrivateKeySigner, Option<String>, Option<String>), VenueError> {
+        let Credential::DepositWalletDelegated {
+            deposit_wallet_address,
+            owner_address,
+            encrypted_owner_key,
+            ..
+        } = cred
+        else {
+            return Err(VenueError::Auth(format!(
+                "{which} 仅支持 DepositWalletDelegated 凭证"
+            )));
+        };
+
+        let signer = self
+            .resolve_owner_signer(encrypted_owner_key)
+            .map_err(VenueError::Auth)?;
+        if signer.address().to_string().to_lowercase() != owner_address.to_lowercase() {
+            return Err(VenueError::Auth(format!(
+                "{which}: owner_address 与解出的 owner EOA 不一致"
+            )));
+        }
+
+        let deposit: Address = deposit_wallet_address
+            .parse()
+            .map_err(|e| VenueError::Auth(format!("deposit_wallet_address 解析失败: {e}")))?;
+        if amount <= 0.0 {
+            return Err(VenueError::Auth(format!("{which} 数量须大于 0")));
+        }
+        // conditionId 须为合法 bytes32 hex（64 hex 字符 + 可选 0x）。
+        let cond_hex = condition_id.trim().trim_start_matches("0x");
+        if cond_hex.len() != 64 || !cond_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(VenueError::Auth(
+                "condition_id 须为 0x 前缀的 32 字节 hex（bytes32）".into(),
+            ));
+        }
+
+        let relayer = self.relayer.clone().ok_or_else(|| {
+            VenueError::Auth(format!(
+                "relayer 未注入：无法发起 WALLET batch {which}（copier 须 with_relayer）"
+            ))
+        })?;
+
+        // 构造单笔 split/merge call：CTF.{split,merge}Positions(pUSD, 0, conditionId, [1,2], amount)。
+        let pusd = crate::wallet_batch::contracts::COLLATERAL
+            .parse::<Address>()
+            .map_err(|e| VenueError::Internal(format!("COLLATERAL 地址解析失败: {e}")))?;
+        let ctf = crate::wallet_batch::contracts::CONDITIONAL_TOKENS
+            .parse::<Address>()
+            .map_err(|e| VenueError::Internal(format!("CONDITIONAL_TOKENS 地址解析失败: {e}")))?;
+        // 人类单位 → 6 decimals 原子单位（pUSD / CTF token 均 6 decimals）。
+        let amount_raw = U256::from((amount * 1_000_000.0) as u128);
+        let data = match which {
+            SplitMerge::Split => crate::wallet_batch::split_positions_calldata(
+                pusd, condition_id, &[1, 2], amount_raw,
+            ),
+            SplitMerge::Merge => crate::wallet_batch::merge_positions_calldata(
+                pusd, condition_id, &[1, 2], amount_raw,
+            ),
+        };
+        let calls = vec![crate::wallet_batch::WalletCall {
+            target: ctf,
+            value: U256::ZERO,
+            data,
+        }];
+
+        // 取当前 WALLET batch nonce（relayer 链上读取）。
+        let nonce = relayer
+            .wallet_nonce(signer.address())
+            .await
+            .map_err(VenueError::Auth)?;
+        // deadline = now + 1h（秒）。
+        let deadline = (chrono::Utc::now().timestamp() + 3600).max(0) as u64;
+        let deadline_str = deadline.to_string();
+
+        let nonce_u256 = U256::from_str_radix(&nonce, 10).unwrap_or(U256::ZERO);
+        let signature = crate::wallet_batch::sign_wallet_batch(
+            &signer,
+            deposit,
+            nonce_u256,
+            U256::from(deadline),
+            &calls,
+        )
+        .map_err(VenueError::Auth)?;
+
+        let submit = relayer
+            .wallet_batch(
+                signer.address(),
+                deposit,
+                &nonce,
+                &deadline_str,
+                &signature,
+                &calls,
+            )
+            .await
+            .map_err(VenueError::Auth)?;
+
+        let relayer_tx_id = submit.transaction_id.clone();
+        let mut tx_hash = submit.transaction_hash.clone();
+
+        // 轮询至确认（最多 ~90s）。失败/超时仍返回 relayer_tx_id 供对账。
+        if let Some(tx_id) = relayer_tx_id.as_deref() {
+            if !tx_id.is_empty() {
+                match relayer.poll_confirmed(tx_id).await {
+                    Ok(row) => {
+                        if tx_hash.is_none() {
+                            tx_hash = row.transaction_hash;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            condition_id = condition_id,
+                            relayer_tx_id = %tx_id,
+                            error = %e,
+                            "{which} relayer 轮询未确认（可能仍在上链）"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok((deposit, signer, tx_hash, relayer_tx_id))
+    }
+}
+
+/// split / merge 标记，用于共用提交逻辑的日志与错误文案。
+#[derive(Debug, Clone, Copy)]
+enum SplitMerge {
+    Split,
+    Merge,
+}
+
+impl std::fmt::Display for SplitMerge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SplitMerge::Split => f.write_str("split"),
+            SplitMerge::Merge => f.write_str("merge"),
+        }
     }
 }
 
@@ -1341,11 +1545,52 @@ mod tests {
                     order_timestamp_ms: None,
                     order_type: sharpside_venues_core::OrderType::Gtc,
                     expiration: None,
+                    post_only: false,
                 },
             )
             .await
             .unwrap_err();
         assert!(matches!(err, VenueError::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn place_order_rejects_post_only_with_market_type() {
+        // post_only 仅限价（Gtc/Gtd）；与市价（Fok/Fak）互斥 → place_order 提前拒单（不签名/不提交）。
+        std::env::remove_var("POLYMARKET_CLOB_POST");
+        let signer = crate::clob::signer_from_hex(
+            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let v = PolymarketVenue::new().with_dev_signer(signer);
+        for t in [
+            sharpside_venues_core::OrderType::Fok,
+            sharpside_venues_core::OrderType::Fak,
+        ] {
+            let err = v
+                .place_order(
+                    &sharpside_venues_core::Credential::Wallet {
+                        encrypted_handle: "x".into(),
+                    },
+                    sharpside_venues_core::Order {
+                        market_id: "m".into(),
+                        token_id: "12345".into(),
+                        side: Side::Buy,
+                        price: 0.5,
+                        size: 10.0,
+                        idempotency_salt: None,
+                        order_timestamp_ms: None,
+                        order_type: t,
+                        expiration: None,
+                        post_only: true,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, VenueError::Auth(_)),
+                "Fok/Fak + post_only 应被拒，got {err:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1372,6 +1617,7 @@ mod tests {
                     order_timestamp_ms: None,
                     order_type: sharpside_venues_core::OrderType::Gtc,
                     expiration: None,
+                    post_only: false,
                 },
             )
             .await
@@ -1414,6 +1660,7 @@ mod tests {
                     order_timestamp_ms: None,
                     order_type: sharpside_venues_core::OrderType::Gtc,
                     expiration: None,
+                    post_only: false,
                 },
             )
             .await
@@ -1458,6 +1705,7 @@ mod tests {
                     order_timestamp_ms: None,
                     order_type: sharpside_venues_core::OrderType::Gtc,
                     expiration: None,
+                    post_only: false,
                 },
             )
             .await
@@ -1506,6 +1754,7 @@ mod tests {
                     order_timestamp_ms: None,
                     order_type: sharpside_venues_core::OrderType::Gtc,
                     expiration: None,
+                    post_only: false,
                 },
             )
             .await
@@ -1547,10 +1796,81 @@ mod tests {
                     order_timestamp_ms: None,
                     order_type: sharpside_venues_core::OrderType::Gtc,
                     expiration: None,
+                    post_only: false,
                 },
             )
             .await
             .unwrap_err();
+        assert!(matches!(err, VenueError::Auth(_)));
+    }
+
+    fn dw_cred() -> sharpside_venues_core::Credential {
+        sharpside_venues_core::Credential::DepositWalletDelegated {
+            deposit_wallet_address: "0x000000000000000000000000000000000000dEaD".into(),
+            owner_address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".into(),
+            encrypted_owner_key: "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                .into(),
+            l2_api_key: "k".into(),
+            encrypted_l2_secret: "s".into(),
+            l2_passphrase: "p".into(),
+            builder_code: "bc".into(),
+        }
+    }
+
+    const GOOD_COND: &str =
+        "0xe322faca2a534900680db54e3a4349a61427d347b6f906d2eeb01f81ae1b082c";
+
+    #[tokio::test]
+    async fn split_rejects_non_positive_amount() {
+        let signer = crate::clob::signer_from_hex(
+            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let v = PolymarketVenue::new().with_dev_signer(signer);
+        let err = v.split(&dw_cred(), GOOD_COND, 0.0).await.unwrap_err();
+        assert!(matches!(err, VenueError::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn merge_rejects_bad_condition_id() {
+        let signer = crate::clob::signer_from_hex(
+            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let v = PolymarketVenue::new().with_dev_signer(signer);
+        // 非 bytes32（长度不对）→ 拒。
+        let err = v.merge(&dw_cred(), "0xnothex", 5.0).await.unwrap_err();
+        assert!(matches!(err, VenueError::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn split_rejects_wrong_credential_type() {
+        // Wallet 凭证（非 DepositWalletDelegated）→ split 拒。
+        let v = PolymarketVenue::new();
+        let err = v
+            .split(
+                &sharpside_venues_core::Credential::Wallet {
+                    encrypted_handle: "x".into(),
+                },
+                GOOD_COND,
+                5.0,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VenueError::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn split_merge_requires_relayer() {
+        // 合法凭证 + 合法 conditionId + 正数 amount，但未注入 relayer → Auth 错误。
+        let signer = crate::clob::signer_from_hex(
+            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        )
+        .unwrap();
+        let v = PolymarketVenue::new().with_dev_signer(signer);
+        let err = v.split(&dw_cred(), GOOD_COND, 5.0).await.unwrap_err();
+        assert!(matches!(err, VenueError::Auth(_)));
+        let err = v.merge(&dw_cred(), GOOD_COND, 5.0).await.unwrap_err();
         assert!(matches!(err, VenueError::Auth(_)));
     }
 }

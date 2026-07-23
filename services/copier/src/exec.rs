@@ -332,9 +332,10 @@ async fn process_one(state: &AppState, order: &CopyOrderRow) -> Result<(), anyho
         size: exec_size,
         idempotency_salt: Some(idempotency_salt),
         order_timestamp_ms: Some(order_timestamp_ms),
-        // 跟单主路径：限价挂单（GTC），与历史行为一致。FOK/FAK/GTD 由调用方按需指定。
+        // 跟单主路径：限价挂单（GTC），与历史行为一致。FOK/FAK/GTD/post-only 由调用方按需指定。
         order_type: OrderType::Gtc,
         expiration: None,
+        post_only: false,
     };
     match venue.place_order(&cred, order_req).await {
         Ok(fill) => {

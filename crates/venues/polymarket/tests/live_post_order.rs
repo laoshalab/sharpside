@@ -294,6 +294,7 @@ async fn live_post_order_signs_and_reaches_balance_check() {
             owner_address,
             sharpside_venues_core::OrderType::Gtc,
             None,
+            false,
         )
         .await;
 
