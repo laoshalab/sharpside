@@ -19,7 +19,7 @@ use alloy_signer_local::PrivateKeySigner;
 use sharpside_clob_auth as clob_auth;
 use std::str::FromStr;
 
-/// USDC / CTF outcome token 小数位（6）。金额精度对齐用 1e5（shares 5 位）与 10_000（USDC 2 位 cent）硬编码，
+/// USDC / CTF outcome token 小数位（6）。金额精度对齐用 1e4（shares 4 位）与 10_000（USDC 2 位 cent）硬编码，
 /// 此常量保留作 6-decimals 约定文档锚点。
 #[allow(dead_code)]
 const DECIMALS: u32 = 6;
@@ -108,12 +108,12 @@ pub fn build_v2_input(
     let token =
         U256::from_str_radix(token_id.trim(), 10).map_err(|e| format!("token_id 解析失败: {e}"))?;
     // 金额精度对齐 Polymarket CLOB 规则：USDC 侧 ≤2 位小数（base 须 10^4 倍 = cent-aligned），
-    // shares 侧 ≤5 位小数（base 须 10 倍）。否则 CLOB 拒单
-    // "maker amount supports a max accuracy of 2 decimals, taker amount a max of 5 decimals"
-    //（py-clob-client issue #68/#87：USDC 非 cent-aligned 即拒）。
-    // shares 向下取整到 5 位（不多占股数）；USDC 按 side 取整到 2 位 cent：
+    // shares 侧 ≤4 位小数（base 须 100 倍）。否则 CLOB 拒单
+    // "maker amount supports a max accuracy of 2 decimals, taker amount a max of 4 decimals"
+    //（实测不同市场精度上限不同：有的 max 5、有的 max 4；取 4 位同时满足两类，更保守）。
+    // shares 向下取整到 4 位（不多占股数）；USDC 按 side 取整到 2 位 cent：
     //   BUY maker=USDC 向上取整（limit ≥ 源价，确保吃 ask 成交）；SELL taker=USDC 向下取整（limit ≤ 源价，确保吃 bid 成交）。
-    let shares_base_u128 = ((size * 1e5).floor() as u128).saturating_mul(10);
+    let shares_base_u128 = ((size * 1e4).floor() as u128).saturating_mul(100);
     let shares_base = U256::from(shares_base_u128);
     let usdc_per_cent = price * (shares_base_u128 as f64) / 10_000.0;
     let usdc_cents = match side {
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(sell.side, 1u8);
     }
 
-    /// P0 回归：USDC 侧须 ≤2 位小数（base 10^4 倍）、shares 侧 ≤5 位（base 10 倍），否则 CLOB 拒单。
+    /// P0 回归：USDC 侧须 ≤2 位小数（base 10^4 倍）、shares 侧 ≤4 位（base 100 倍），否则 CLOB 拒单。
     /// 0.778×6=4.668（3 位小数）须被对齐：BUY maker 向上取整到 4.67 USDC（limit 0.77833 ≥ 0.778 吃 ask），
     /// taker=6 shares。SELL taker 向下取整到 4.66 USDC（limit 0.77667 ≤ bid 吃 bid）。
     #[test]
@@ -422,11 +422,11 @@ mod tests {
             &signer, maker, sig_type::EOA, Side::Buy, "1", 0.778, 6.0, B256::ZERO, None, None,
         )
         .unwrap();
-        // maker=USDC 4.67（base 4_670_000，2 位小数 ✓），taker=shares 6（base 6_000_000，5 位 ✓）
+        // maker=USDC 4.67（base 4_670_000，2 位小数 ✓），taker=shares 6（base 6_000_000，4 位 ✓）
         assert_eq!(buy.maker_amount, U256::from(4_670_000u128));
         assert_eq!(buy.taker_amount, U256::from(6_000_000u128));
         assert_eq!(buy.maker_amount % U256::from(10_000u128), U256::ZERO, "USDC 非 cent-aligned");
-        assert_eq!(buy.taker_amount % U256::from(10u128), U256::ZERO, "shares 非 5 位对齐");
+        assert_eq!(buy.taker_amount % U256::from(100u128), U256::ZERO, "shares 非 4 位对齐");
 
         // SELL 6 shares @ 0.778
         let sell = build_v2_input(
